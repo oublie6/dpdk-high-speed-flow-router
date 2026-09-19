@@ -6,7 +6,7 @@ This project is intentionally not a generic DPDK sample and not an application-l
 
 ## Current Status
 
-**Goal 001 implemented: Go -> cgo -> project C API -> DPDK EAL init/info/cleanup.**
+**Goal 001 accepted: Go -> cgo -> project C API -> DPDK EAL init/info/cleanup.**
 
 The Linux CLI performs a one-shot runtime probe with explicit EAL arguments.
 The thin wrapper owns C argument memory and pins the lifecycle to one OS thread.
@@ -358,9 +358,9 @@ The long-term goal is to understand both:
 
 ## Current next step
 
-Goal 001 is ready for ChatGPT review of the commit, ownership and acceptance
-evidence. Do not start Goal 002 until that review and the next design discussion
-settle:
+Goal 001 has passed ChatGPT review. Before Goal 002 implementation, first
+standardize the development baseline on DPDK 25.11.3 and settle the native C
+build organization; then the next design discussion will settle:
 
 1. what exactly a `route`, `flow`, and `policy` mean in v0.1;
 2. which packet fields can be rewritten;
