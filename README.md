@@ -1,75 +1,104 @@
 # DPDK High-Speed Flow Router
 
-A high-performance **L2-L4 userspace flow router** built with **Go control plane + thin cgo + C/DPDK dataplane**.
+一个采用 **Go 控制面 + thin cgo + C/DPDK 数据面** 的高速 **L2-L4 用户态 Flow Router**。
 
-This project is intentionally not a generic DPDK sample and not an application-layer proxy. Its goal is to build a small but complete, measurable packet dataplane that can be explained from NIC queues all the way to packet parsing, lookup, rewrite, forwarding, overload behavior, and benchmark results.
+这个项目不是普通的 DPDK API demo，也不是应用层 proxy。目标是实现一个小而完整、可测量、可解释的数据面系统，并能够从 queue、mbuf、parser、lookup、rewrite 一直讲到 overload 和 benchmark。
 
-## Current Status
+## 当前状态
 
-**Goal 001 accepted: Go -> cgo -> project C API -> DPDK EAL init/info/cleanup.**
+**Goal 001 已验收通过：Go -> cgo -> project C API -> DPDK EAL init/info/cleanup。**
 
-The Linux CLI performs a one-shot runtime probe with explicit EAL arguments.
-The thin wrapper owns C argument memory and pins the lifecycle to one OS thread.
-RX/TX, mempools, parsing, tables, rewrite, workers and all performance measurements
-remain unimplemented. See [architecture and ownership](docs/architecture.md) and
-[Goal 001 acceptance evidence](docs/goals/001-bootstrap-go-cgo-dpdk.md).
+当前已经完成：
 
-## Build and run the EAL probe
+- Go CLI 作为程序入口；
+- thin cgo wrapper；
+- 项目级 C API；
+- 真实 DPDK EAL init / runtime info / cleanup；
+- EAL argv 的 C memory ownership；
+- EAL 生命周期固定在一个 locked OS thread；
+- build / test / vet / EAL integration evidence；
+- 只读环境检查脚本。
 
-Prerequisites: Linux, Go 1.13 or later with cgo, GCC (or Clang via `CC=clang`),
-make, pkg-config and system DPDK development files. The verified versions are
-recorded in Goal 001. On Debian/Ubuntu the dependency packages are:
+尚未实现：
 
-```sh
-sudo apt-get install golang-go gcc libc6-dev make pkg-config libdpdk-dev
+- mempool；
+- port / virtual PMD；
+- RX/TX queue；
+- packet parser；
+- flow/route table；
+- rewrite；
+- worker；
+- multi-queue / RSS；
+- benchmark；
+- Web API / frontend。
+
+详细边界见 [架构与 ownership](docs/architecture.md)，Goal 001 的实现与验收证据见 [Goal 001](docs/goals/001-bootstrap-go-cgo-dpdk.md)。
+
+## 当前重要约束
+
+Goal 001 的实际环境使用了 DPDK 19.11.14，但既有软件实验主线已经使用 DPDK 25.11.3。
+
+因此进入 Goal 002 前先做两件事：
+
+1. **把新项目统一到 DPDK 25.11.3**；
+2. **确定稳定的 native C dataplane 构建方式**，不让后续大量 C 文件继续依赖 `#include *.c + go build -a` 的过渡模式。
+
+当前仍然只做 software/simulation dataplane：
+
+- 不 bind/unbind 真实 NIC；
+- 不使用管理网卡做 VFIO；
+- 不修改默认路由或防火墙；
+- 不宣称真实 NIC、hardware RSS 或 NUMA 性能。
+
+## Goal 001：构建与 EAL 验证
+
+依赖 Linux、Go+cgo、GCC/Clang、make、pkg-config 和 DPDK development files。
+
+~~~sh
 ./scripts/check_env.sh
 make build
-# System DPDK's forced include needs this narrow allowlist with older cgo:
+~~~
+
+Goal 001 的旧验证环境需要：
+
+~~~sh
 export CGO_CFLAGS_ALLOW='-include|rte_config.h'
-# Direct build (force recompilation of C sources outside the Go package):
-go build -a -o bin/flow-router ./cmd/flow-router
-```
+~~~
 
-DPDK headers and libraries come from `pkg-config libdpdk`; for a non-system
-installation, set `PKG_CONFIG_PATH`. No machine-specific include/library paths
-are embedded in the build. The environment check is read-only and reports
-missing prerequisites, HugePages, CPU affinity and available NUMA information.
+然后选择当前进程允许使用的 CPU：
 
-Choose a CPU from the process's allowed affinity list. This example selects the
-first allowed CPU and maps it to DPDK logical lcore zero:
-
-```sh
+~~~sh
 EAL_CPU=$(awk '/Cpus_allowed_list/ {split($2, a, /[-,]/); print a[1]}' /proc/self/status)
 ./bin/flow-router -- --lcores="0@${EAL_CPU}" --no-huge --no-pci --no-shconf -m 64
-```
+~~~
 
-This allocates 64 MiB of EAL memory without HugePages and disables PCI probing
-and shared configuration. It needs no NIC binding or network changes. Success
-prints DPDK version, initialization status, main lcore/count and cleanup status,
-then exits zero. Invalid EAL arguments exit nonzero with operation/error context.
-All arguments after `--` are passed to EAL; choose them deliberately. A fresh
-process is required for each probe, including after failures.
+成功时会打印：
 
-```sh
+~~~text
+DPDK version: ...
+EAL init succeeded: ...
+EAL cleanup succeeded
+~~~
+
+这条链路只证明 EAL 和 Go/cgo/C 边界，不代表 dataplane 收发性能。
+
+测试：
+
+~~~sh
 export CGO_CFLAGS_ALLOW='-include|rte_config.h'
 go test ./...
 go vet ./...
 bash -n scripts/check_env.sh
 bash -n scripts/start_codex_tmux.sh
-# Opt-in real EAL tests (success, invalid arguments, repeated-init rejection):
+
 FLOW_ROUTER_TEST_CPU="$EAL_CPU" go test -count=1 -v ./control/dataplane
-```
+~~~
 
-The ordinary test run checks NUL rejection and skips the EAL integration test
-unless `FLOW_ROUTER_TEST_CPU` is set. No EAL behavior is mocked. The existing
-`start_codex_tmux.sh` is a development helper that may install/configure tmux;
-it is separate from the read-only environment checker.
+## 为什么做这个项目
 
-## Why this project
+我们真正想验证的是下面这些工程问题：
 
-The project is designed around the engineering problems that matter in high-performance network dataplanes:
-
-```text
+~~~text
 RSS / multi-queue
         ↓
 RXQ single ownership
@@ -87,22 +116,22 @@ action / rewrite
 bounded TX
         ↓
 benchmark
-```
+~~~
 
-The objective is not simply to prove that DPDK can receive and transmit packets. The objective is to answer questions such as:
+最终项目要能够回答：
 
-- Why is one RX queue usually owned by one lcore?
-- How should mbuf ownership move through RX and TX?
-- When does Run-To-Completion beat a cross-core pipeline?
-- How should flow affinity interact with RSS?
-- How should TX short returns be handled without leaks or infinite retry?
-- What state should be per-lcore?
-- What changes when the hardware is NUMA?
-- Which optimizations actually improve end-to-end throughput?
+- 为什么 RXQ 通常由一个固定 lcore owner 处理？
+- mbuf ownership 在 RX、应用和 TX 之间怎么转移？
+- 什么时候 RTC 比 cross-core pipeline 更合适？
+- RSS 和 flow affinity 如何配合？
+- TX short return 怎么处理才不会泄漏或无限 retry？
+- 哪些状态应该做 per-lcore？
+- NUMA 对 queue/lcore/mempool 有什么影响？
+- 哪些优化对整条 datapath 真的有效？
 
-## Target architecture
+## 目标架构
 
-```text
+~~~text
                        Go Control Plane
                 config / rules / lifecycle
                           / stats
@@ -135,239 +164,193 @@ The objective is not simply to prove that DPDK can receive and transmit packets.
 |        |                                                       |
 |       TXQ -> NIC                                               |
 +----------------------------------------------------------------+
-```
+~~~
 
-The hot packet path stays in C/DPDK. Go does not process packets one by one.
+packet hot path 全部留在 C/DPDK。Go 不逐包处理。
 
-## v0.1 scope
+## v0.1 范围
 
-The first version is deliberately constrained.
-
-### Protocols
+### 协议
 
 - Ethernet
 - IPv4
 - TCP
 - UDP
 
-### Core features
+### 核心能力
 
-- L2/L3/L4 parsing;
-- route and/or exact flow lookup;
-- packet drop;
-- output-port forwarding;
-- basic IPv4/TCP/UDP field rewrite;
-- RX/TX burst processing;
-- fixed RXQ -> lcore ownership;
-- multi-queue architecture;
-- RSS-aware flow affinity;
-- Run-To-Completion fast path;
-- per-lcore statistics;
-- bounded TX retry/drop policy;
-- reproducible functional and performance tests.
+- L2/L3/L4 parse；
+- route 和/或 exact flow lookup；
+- packet drop；
+- output-port forwarding；
+- 基础 IPv4/TCP/UDP rewrite；
+- RX/TX burst；
+- fixed RXQ -> lcore ownership；
+- multi-queue architecture；
+- RSS-aware flow affinity；
+- Run-To-Completion fast path；
+- per-lcore stats；
+- bounded TX retry/drop；
+- 可重复 functional/performance test。
 
-### Control plane
+### Go 控制面
 
-The Go side will own:
+Go 后续负责：
 
-- configuration;
-- route/rule lifecycle;
-- process lifecycle;
-- stats access;
-- later, immutable rule/config publication.
+- configuration；
+- route/rule lifecycle；
+- dataplane lifecycle；
+- stats access；
+- 后续 immutable config/rule publication；
+- 再后续 REST/gRPC 和 Web frontend。
 
-The cgo layer must remain thin and coarse-grained.
+cgo 必须保持薄且粗粒度。
 
-## Non-goals for v0.1
+## v0.1 明确不做
 
-The following are intentionally deferred:
+第一版暂不做：
 
-- IPv6;
-- NAT;
-- conntrack;
-- TCP connection termination;
-- TCP stream reassembly;
-- user-space TCP stack;
-- Kafka/DDS/HTTP/SFTP or other L7 parsing;
-- DPI;
-- large wildcard ACL engine;
-- crypto;
-- generic plugin architecture;
-- VPP-like graph engine;
-- mandatory cross-core rte_ring pipeline;
-- distributed control plane.
+- IPv6；
+- NAT；
+- conntrack；
+- TCP termination；
+- TCP stream reassembly；
+- user-space TCP stack；
+- Kafka/DDS/HTTP/SFTP 等 L7 parsing；
+- DPI；
+- 大型 wildcard ACL engine；
+- crypto；
+- generic plugin framework；
+- VPP-like graph engine；
+- 强制 cross-core `rte_ring` pipeline；
+- distributed control plane。
 
-The first release should be small enough to finish, benchmark, explain, and defend in an interview.
+先把 baseline dataplane 做完整、测清楚，再决定后续能力。
 
-## Design principles
+## 设计原则
 
-### Single-owner dataplane
+### single owner
 
-The default model is:
+默认：
 
-```text
+~~~text
 RSS -> RXQ -> fixed lcore -> RTC -> TXQ
-```
+~~~
 
-Hardware RSS performs the first level of flow sharding. The dataplane should preserve ownership and locality instead of immediately redistributing packets in software.
+优先保持 ownership 和 cache locality，不在软件里无意义地重新分发。
 
-### Run-To-Completion first
+### RTC first
 
-A packet should normally be parsed, looked up, modified, and transmitted by the same lcore that receives it.
+一个 packet 默认由同一个 lcore 完成 parse、lookup、rewrite、TX。
 
-Cross-core `rte_ring` pipelines are added only when measurements demonstrate a heavy/slow stage that benefits from separation.
+只有 benchmark 证明某个 heavy/slow stage 需要拆分时，才引入 `rte_ring` pipeline。
 
-### NUMA-aware when hardware permits
+### NUMA-aware
 
-A real-NIC deployment should try to align:
+真实 NIC 环境下尽量让：
 
-```text
+~~~text
 NIC
 + RX/TX queues
 + worker lcores
 + mempool
 + hot flow/route state
-```
+~~~
 
-within the same NUMA node.
+位于同一 NUMA node。
 
-The initial cloud/software lab cannot fully prove real-NIC NUMA performance, so software-lab results will be labeled honestly.
+当前 software lab 不用于证明真实 NIC NUMA 性能。
 
-### Explicit ownership
+### ownership 明确
 
-Every mbuf must have an unambiguous owner.
-
-In particular:
-
-```text
-RX burst returns mbuf
+~~~text
+RX burst 返回 mbuf
         ↓
 application owns it
         ↓
-TX accepts mbuf
+TX 接受 mbuf
         ↓
-PMD/TX owns accepted packets
+PMD/TX owns accepted packet
 
-TX does not accept mbuf
+TX 未接受 mbuf
         ↓
-application still owns it
+application 仍然 owns it
         ↓
 bounded retry / drop / free
-```
+~~~
 
-### Evidence-driven optimization
+### evidence-driven
 
-The project will prefer measurements over folklore.
+没有 workload、环境和测量，不做性能结论。
 
-No optimization is considered successful merely because it is theoretically faster.
+## 开发路线
 
-## Planned repository structure
-
-```text
-.
-├── AGENTS.md
-├── README.md
-├── docs/
-│   ├── architecture.md
-│   ├── dataplane.md
-│   ├── control-plane.md
-│   └── benchmark.md
-├── cmd/
-│   └── flow-router/
-├── control/
-├── dataplane/
-│   ├── core/
-│   ├── parser/
-│   ├── lookup/
-│   └── action/
-├── include/
-├── configs/
-├── scripts/
-├── benchmarks/
-├── results/
-└── tests/
-```
-
-Directories will be created when they are needed rather than as empty scaffolding.
-
-## Planned implementation path
-
-```text
-Phase 0  Scope and architecture
+~~~text
+Goal 001  Go/cgo/C + EAL                         ✅
         ↓
-Phase 1  Go/C build skeleton + EAL
+环境基线  DPDK 25.11.3 + native C build
         ↓
-Phase 2  mempool + port + RX/TX queues
+Goal 002  mempool + virtual PMD + RXQ/TXQ + RTC
         ↓
-Phase 3  single-queue RTC forwarding
+Goal 003  Ethernet / IPv4 / TCP / UDP parser
         ↓
-Phase 4  Ethernet / IPv4 / TCP / UDP parser
+Goal 004  route / flow lookup
         ↓
-Phase 5  route / flow lookup
+Goal 005  DROP / FORWARD / REWRITE
         ↓
-Phase 6  drop / forward / rewrite
+Goal 006  Go 动态规则管理
         ↓
-Phase 7  stats + bounded TX handling
+Goal 007  QSBR / RCU 热更新
         ↓
-Phase 8  multi-queue + RSS + fixed lcore
+Goal 008  multi-queue / RSS / fixed lcore
         ↓
-Phase 9  benchmark and profiling
+Goal 009  benchmark / profiling
         ↓
-Phase 10 evidence-driven optimization
-```
+Goal 010  API + Web frontend
+~~~
 
-Later releases may add conntrack, NAT, richer ACLs, slow paths, or other stateful features, but only after the baseline dataplane is stable and measurable.
+## Benchmark 目标
 
-## Benchmark goals
+至少记录：
 
-The project will track at least:
+- Mpps / Gbps；
+- RX/TX/drop；
+- CPU；
+- cycles/packet（可行时）；
+- packet size / flow count；
+- queue count / burst size；
+- workload duration；
+- DPDK version；
+- PMD/NIC 类型。
 
-- packets per second;
-- throughput in Gbps;
-- RX/TX/drop counters;
-- CPU utilization;
-- cycles per packet when practical;
-- packet size;
-- flow count;
-- queue count;
-- burst size;
-- workload duration.
+software PMD/TAP/PCAP 结果只标记为软件实验。
 
-Benchmark reports must also identify whether the test used a software PMD/TAP/PCAP path or a real DPDK-capable NIC.
+## 与 VPP 的关系
 
-## Related work
+本仓库坚持 **DPDK-first / from-scratch**。
 
-This project is deliberately **DPDK-first and from-scratch**.
+后续会单独建立 VPP / GoVPP 项目：
 
-A separate future project will study **VPP / GoVPP** and compare this project's design with an industrial userspace dataplane framework:
-
-```text
-P4 / P4Runtime experience
+~~~text
+P4 / P4Runtime
         ↓
-this DPDK Flow Router
+DPDK High-Speed Flow Router
         ↓
 VPP / GoVPP
         ↓
 Cloud Native / Cloud Network Dataplane
-```
+~~~
 
-The long-term goal is to understand both:
+这个项目负责证明“自己从底层构建数据面”的能力；VPP 项目负责学习和实践成熟工业级框架。
 
-- how a high-performance dataplane is built from first principles;
-- how the same problems are solved in a mature framework such as VPP.
+## 当前下一步
 
-## Current next step
+先讨论并确定：
 
-Goal 001 has passed ChatGPT review. Before Goal 002 implementation, first
-standardize the development baseline on DPDK 25.11.3 and settle the native C
-build organization; then the next design discussion will settle:
+1. DPDK 25.11.3 环境如何复用；
+2. native C dataplane 如何构建并与 cgo 链接；
+3. Goal 002 的 virtual PMD 拓扑；
+4. mempool / port / RXQ / TXQ 生命周期；
+5. single-lcore RTC loop。
 
-1. what exactly a `route`, `flow`, and `policy` mean in v0.1;
-2. which packet fields can be rewritten;
-3. the first software test topology;
-4. port / queue / lcore mapping;
-5. the configuration model;
-6. the Go/C API;
-7. the first benchmark baseline.
-
-See [AGENTS.md](AGENTS.md) for project development rules.
+开发协作规则见 [AGENTS.md](AGENTS.md)。

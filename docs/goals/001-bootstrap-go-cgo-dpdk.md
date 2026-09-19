@@ -62,7 +62,7 @@ Go process exits cleanly
 
 Go 只负责：
 
-- process lifecycle；
+- 进程生命周期；
 - 配置与参数准备；
 - 调用粗粒度 C API；
 - 接收状态/错误；
@@ -74,7 +74,7 @@ C 层负责：
 
 - DPDK EAL；
 - 后续 port/queue/mempool/worker；
-- 后续 packet hot path。
+- 后续 packet 热路径。
 
 ### 3.3 禁止逐包跨 cgo
 
@@ -137,7 +137,7 @@ dp_runtime_cleanup(...)
 - 正常退出时执行 cleanup；
 - 不把 DPDK C API 大面积暴露到 Go 业务代码。
 
-### 5.2 thin cgo wrapper
+### 5.2 thin cgo 封装
 
 要求：
 
@@ -147,7 +147,7 @@ dp_runtime_cleanup(...)
 - 字符串/argv 转换有明确分配与释放；
 - C 返回值统一转换成 Go error/status。
 
-### 5.3 C public API
+### 5.3 C 公共 API
 
 至少提供一个稳定的项目级 API，而不是 Go 直接调用 rte_eal_init()。
 
@@ -171,7 +171,7 @@ int dp_runtime_cleanup(void);
 必须实际调用 DPDK：
 
 - rte_eal_init()；
-- 获取至少一项 runtime 信息，例如 main lcore / lcore count / DPDK version；
+- 获取至少一项 运行时信息，例如 main lcore / lcore count / DPDK version；
 - rte_eal_cleanup()。
 
 不要用 mock 假装 EAL 成功。
@@ -306,7 +306,7 @@ make build
 ~~~
 Go
 -> cgo
--> project C API
+-> 项目 C API
 -> rte_eal_init
 -> read DPDK runtime info
 -> rte_eal_cleanup
@@ -339,7 +339,7 @@ Go
 4. 更新 README Current Status；
 5. 不删除或弱化 AGENTS.md 中的项目约束；
 6. 不提交 secrets、host-sensitive data、巨大日志；
-7. 创建一个 focused commit。
+7. 创建一个 聚焦提交。
 
 建议 commit message：
 
@@ -369,10 +369,10 @@ Codex 完成并提交后，下一步不是立即继续开发。
 commit / diff
 -> project layout
 -> Go/cgo/C boundary
--> ownership/lifetime
+-> ownership / 生命周期
 -> build/test evidence
--> EAL runtime evidence
--> scope compliance
+-> EAL 运行证据
+-> 范围合规
 ~~~
 
 验收通过后，再共同设计 Goal 002：
@@ -382,7 +382,7 @@ commit / diff
 
 ## 12. 实现与验收记录（2026-09-19）
 
-本次只实现 Goal 001：Go CLI、thin cgo wrapper、项目 C API、真实 EAL
+本次只实现 Goal 001：Go CLI、thin cgo 封装、项目 C API、真实 EAL
 init/info/cleanup、Makefile、只读环境检查，以及 ownership/lifecycle 文档。
 关键线程、argv、错误转换和 cleanup 边界均有代码注释。
 未实现第 7 节列出的任何后续 dataplane 功能；没有性能测试或性能结论。
@@ -415,7 +415,7 @@ make build
 ./scripts/check_env.sh
 ```
 
-结果：修正后的 build、test、vet、两个 Bash 语法检查、环境检查均退出 0。
+结果：修正后的 构建、测试、vet、两个 Bash 语法检查、环境检查均退出 0。
 普通 `go test ./...` 运行 NUL 参数拒绝测试；真实 EAL 集成测试默认跳过，
 通过下面的显式命令另外运行。`start_codex_tmux.sh` 仅做语法检查，没有执行
 其安装或配置操作。提交前 `git status --short` 显示本次预期变更。
@@ -468,7 +468,7 @@ test "$?" -eq 2
 - README 已记录实际状态、依赖、运行方法、测试和下一步；详细 ownership、
   失败时的内存生命周期与未来 worker/rule-update 边界见 `docs/architecture.md`。
 
-下一步仅为 ChatGPT 验收本次 focused commit，验收通过后再讨论 Goal 002。
+下一步仅为 ChatGPT 验收本次 聚焦提交，验收通过后再讨论 Goal 002。
 路由/流表语义、rewrite、虚拟拓扑、queue/lcore 模型和 benchmark baseline
 仍待共同设计，不属于本次已实现能力。
 
@@ -481,14 +481,14 @@ test "$?" -eq 2
 
 验收确认：
 
-- scope 合规：没有提前实现 RX/TX、mempool、parser、flow/route table、RCU/QSBR、RSS 或前端；
+- 范围合规：没有提前实现 RX/TX、mempool、parser、flow/route table、RCU/QSBR、RSS 或前端；
 - Go/cgo/C 边界清晰：只有 `control/dataplane` 使用 cgo，Go 业务层不直接暴露 DPDK API；
-- EAL 生命周期真实跑通：Go -> cgo -> project C API -> EAL init/info/cleanup；
+- EAL 生命周期真实跑通：Go -> cgo -> 项目 C API -> EAL init/info/cleanup；
 - `argv` 使用 C 内存，未把 Go pointer 长期交给 C；EAL 可修改 argv 的约束被显式处理；
-- EAL init/info/cleanup 固定在一个 locked OS thread 上执行，避免 Go goroutine 在线程间迁移；
+- EAL init/info/cleanup 固定在一个 锁定的 OS thread 上执行，避免 Go goroutine 在线程间迁移；
 - init 失败、cleanup、重复 init、非法参数均有明确处理；
-- build/test/vet/shell syntax/EAL integration 的真实执行证据已记录；
-- 当前仅为 software/simulation lifecycle evidence，没有真实 NIC、RSS、NUMA 或性能结论。
+- build/test/vet/Shell 语法检查/EAL 集成测试 的真实执行证据已记录；
+- 当前仅为 软件仿真环境下的生命周期证据，没有真实 NIC、RSS、NUMA 或性能结论。
 
 进入 Goal 002 前需要先处理两项工程约束：
 
