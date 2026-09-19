@@ -1,7 +1,7 @@
 # Goal 001：项目骨架与 Go -> cgo -> C/DPDK EAL 最小闭环
 
 日期：2026-09-19
-状态：✅ 已实现并完成 Codex 验证；待 ChatGPT 验收
+状态：✅ 已实现、Codex 验证并通过 ChatGPT 验收
 
 ## 1. 背景
 
@@ -471,3 +471,36 @@ test "$?" -eq 2
 下一步仅为 ChatGPT 验收本次 focused commit，验收通过后再讨论 Goal 002。
 路由/流表语义、rewrite、虚拟拓扑、queue/lcore 模型和 benchmark baseline
 仍待共同设计，不属于本次已实现能力。
+
+
+## 13. ChatGPT 验收记录（2026-09-19）
+
+验收 commit：`5060e1462a12c8af2585496934575656ee55beb2`
+
+结论：**Goal 001 通过，可以进入 Goal 002 设计。**
+
+验收确认：
+
+- scope 合规：没有提前实现 RX/TX、mempool、parser、flow/route table、RCU/QSBR、RSS 或前端；
+- Go/cgo/C 边界清晰：只有 `control/dataplane` 使用 cgo，Go 业务层不直接暴露 DPDK API；
+- EAL 生命周期真实跑通：Go -> cgo -> project C API -> EAL init/info/cleanup；
+- `argv` 使用 C 内存，未把 Go pointer 长期交给 C；EAL 可修改 argv 的约束被显式处理；
+- EAL init/info/cleanup 固定在一个 locked OS thread 上执行，避免 Go goroutine 在线程间迁移；
+- init 失败、cleanup、重复 init、非法参数均有明确处理；
+- build/test/vet/shell syntax/EAL integration 的真实执行证据已记录；
+- 当前仅为 software/simulation lifecycle evidence，没有真实 NIC、RSS、NUMA 或性能结论。
+
+进入 Goal 002 前需要先处理两项工程约束：
+
+1. **统一 DPDK 版本**
+   - Goal 001 所在环境实际验证为 DPDK 19.11.14；
+   - 既有软件实验主线使用 DPDK 25.11.3；
+   - Goal 002 开始 port/vdev/mempool/RX/TX 前，应统一到 DPDK 25.11.3，避免新项目继续背负旧版本 API/构建差异。
+
+2. **收敛 C 构建组织**
+   - 当前 `control/dataplane/runtime_linux.c` 通过 include 外部 `dataplane/core/dp_runtime.c` 让 cgo 编译；
+   - `make build` 因此外加 `go build -a` 避免 Go cache 漏掉外部 C 变更；
+   - 作为 Goal 001 bootstrap 可以接受，但随着 dataplane C 文件增加不应继续扩大这种模式；
+   - Goal 002 设计时应确定稳定的 native dataplane 构建方式，使普通 build/test 能正确追踪 C 源码依赖。
+
+除以上两项外，未发现阻止 Goal 002 的问题。
