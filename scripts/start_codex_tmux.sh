@@ -5,8 +5,8 @@ set -euo pipefail
 
 NO_ATTACH=0
 TMUX_CONF="${HOME}/.tmux.conf"
-TMUX_COLOR_BLOCK_BEGIN="# >>> start-codex-tmux color config >>>"
-TMUX_COLOR_BLOCK_END="# <<< start-codex-tmux color config <<<"
+TMUX_COLOR_BLOCK_BEGIN="# >>> start-codex-tmux 颜色配置 >>>"
+TMUX_COLOR_BLOCK_END="# <<< start-codex-tmux 颜色配置 <<<"
 CODEX_CMD="env TERM=screen-256color COLORTERM=truecolor codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox"
 
 err() {
@@ -89,12 +89,12 @@ ensure_tmux_config() {
 
 usage() {
   cat <<EOF
-Usage: $0 [--no-attach]
+用法: $0 [--no-attach]
 
-Options:
+选项:
   --no-attach  只创建或确认 tmux session 存在，不 attach 到终端。
 
-Environment:
+环境变量:
   CODEX_TMUX_SESSION  自定义 session 名称。
                       默认: codex-dpdk-high-speed-flow-router
 EOF

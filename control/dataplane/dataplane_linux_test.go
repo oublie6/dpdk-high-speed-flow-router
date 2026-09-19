@@ -7,10 +7,10 @@ import (
 	"testing"
 )
 
-// Each EAL case needs a fresh process: cleanup does not allow reinitialization.
-// Opt in explicitly because this test allocates EAL memory and pins a thread.
-// Supply an allowed physical CPU, mapped to logical lcore zero even when the
-// host CPU number exceeds DPDK's configured maximum logical lcore number.
+// 每个 EAL case 都需要独立进程：cleanup 后不能在同一进程再次初始化。
+// 真实 EAL 集成测试需要显式设置 FLOW_ROUTER_TEST_CPU，避免普通 unit test
+// 无意占用 EAL 内存或修改当前线程 affinity。
+// 这里把允许使用的 physical CPU 映射到 DPDK logical lcore 0。
 func TestEALLifecycle(t *testing.T) {
 	cpu := os.Getenv("FLOW_ROUTER_TEST_CPU")
 	if cpu == "" {
@@ -39,6 +39,7 @@ func TestEALLifecycle(t *testing.T) {
 		}
 		return
 	}
+
 	for _, mode := range []string{"success", "invalid"} {
 		t.Run(mode, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestEALLifecycle$", "-test.v")
