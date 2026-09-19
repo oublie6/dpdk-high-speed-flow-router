@@ -429,19 +429,18 @@ Codex 不得主动越过 Goal scope。
 Goal 001 ✅
 Go -> cgo -> project C API -> DPDK EAL
 
-下一步：
-1. 统一 DPDK 版本到 25.11.3
-2. 收敛 native C dataplane 构建组织
-3. 设计 Goal 002
+Goal 002 已定义，等待 Codex 执行：
+1. 在新机器统一 DPDK 到 25.11.3
+2. 收敛 package-local native C 构建组织
+3. 跑通双 TAP Virtual PMD + 单 RXQ/TXQ + 单 lcore RTC 原样转发
 ~~~
 
 当前阶段仍然只做 software/simulation dataplane，不绑定真实 NIC，不修改服务器管理网络。
 
-## 17. Goal 002 前必须讨论
+## 17. 当前执行任务
 
-1. 如何统一到 DPDK 25.11.3；
-2. C dataplane 如何独立构建并稳定链接到 cgo；
-3. virtual PMD 软件拓扑；
-4. mempool / port / RXQ / TXQ 生命周期；
-5. single-RXQ single-lcore RTC loop；
-6. 后续 route / flow / policy 的职责边界。
+当前只执行：
+
+`docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md`
+
+Codex 必须严格按照 Goal 002 的 Gate A / Gate B 和 scope 执行，完成后停止继续开发，等待 ChatGPT 验收。
