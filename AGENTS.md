@@ -390,6 +390,31 @@ software PMD/TAP/PCAP 的结果必须标明为软件实验，不得描述成真�
 
 ## 14. Goal / Codex / 验收工作流
 
+### 14.1 每次执行前必须同步仓库
+
+Codex 每次开始新的 Goal、修复任务或继续上一次任务前，必须先同步远端最新代码。
+
+推荐流程：
+
+~~~bash
+git status --short
+git branch --show-current
+git fetch origin
+git pull --ff-only origin main
+~~~
+
+执行要求：
+
+- 默认以远端最新 `main` 作为任务起点；
+- 开始前先确认当前 branch 和工作区状态；
+- 如果存在未提交修改，不允许直接 pull 覆盖，也不允许自行丢弃用户修改；
+- 如果 `git pull --ff-only` 失败、出现 divergence/conflict，立即停止并报告；
+- 不允许使用 `git reset --hard`、强制覆盖、自动 rebase 用户未确认的修改；
+- 同步完成后，再重新阅读最新的 `AGENTS.md`、`README.md`、相关 Goal 文档；
+- 任何任务都不能基于旧 clone/旧 commit 直接开始实现。
+
+### 14.2 标准工作流
+
 项目默认采用：
 
 ~~~text
