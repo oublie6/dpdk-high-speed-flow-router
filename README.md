@@ -345,12 +345,19 @@ Cloud Native / Cloud Network Dataplane
 
 ## 当前下一步
 
-先讨论并确定：
+Goal 002 已定义，当前等待 Codex 执行：
 
-1. DPDK 25.11.3 环境如何复用；
-2. native C dataplane 如何构建并与 cgo 链接；
-3. Goal 002 的 virtual PMD 拓扑；
-4. mempool / port / RXQ / TXQ 生命周期；
-5. single-lcore RTC loop。
+[Goal 002：统一 DPDK 25.11.3、收敛 native C 构建，并跑通 TAP RTC 转发](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md)
+
+本阶段将在新机器完成：
+
+1. DPDK 25.11.3 安装和版本锁定；
+2. package-local native C 构建组织；
+3. 双 TAP Virtual PMD；
+4. mempool + 单 RXQ/TXQ；
+5. single-lcore RTC 原样 forwarding；
+6. exact marker 端到端验证。
+
+仍然只做软件仿真，不绑定真实 NIC。
 
 开发协作规则见 [AGENTS.md](AGENTS.md)。
