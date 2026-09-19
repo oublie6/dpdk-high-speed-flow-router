@@ -4,11 +4,66 @@ A high-performance **L2-L4 userspace flow router** built with **Go control plane
 
 This project is intentionally not a generic DPDK sample and not an application-layer proxy. Its goal is to build a small but complete, measurable packet dataplane that can be explained from NIC queues all the way to packet parsing, lookup, rewrite, forwarding, overload behavior, and benchmark results.
 
-## Status
+## Current Status
 
-**Design phase / v0.1 not implemented yet.**
+**Goal 001 implemented: Go -> cgo -> project C API -> DPDK EAL init/info/cleanup.**
 
-The repository is being initialized first with architecture and scope constraints. The first implementation starts only after the v0.1 semantics and Go/C boundary are agreed on.
+The Linux CLI performs a one-shot runtime probe with explicit EAL arguments.
+The thin wrapper owns C argument memory and pins the lifecycle to one OS thread.
+RX/TX, mempools, parsing, tables, rewrite, workers and all performance measurements
+remain unimplemented. See [architecture and ownership](docs/architecture.md) and
+[Goal 001 acceptance evidence](docs/goals/001-bootstrap-go-cgo-dpdk.md).
+
+## Build and run the EAL probe
+
+Prerequisites: Linux, Go 1.13 or later with cgo, GCC (or Clang via `CC=clang`),
+make, pkg-config and system DPDK development files. The verified versions are
+recorded in Goal 001. On Debian/Ubuntu the dependency packages are:
+
+```sh
+sudo apt-get install golang-go gcc libc6-dev make pkg-config libdpdk-dev
+./scripts/check_env.sh
+make build
+# System DPDK's forced include needs this narrow allowlist with older cgo:
+export CGO_CFLAGS_ALLOW='-include|rte_config.h'
+# Direct build (force recompilation of C sources outside the Go package):
+go build -a -o bin/flow-router ./cmd/flow-router
+```
+
+DPDK headers and libraries come from `pkg-config libdpdk`; for a non-system
+installation, set `PKG_CONFIG_PATH`. No machine-specific include/library paths
+are embedded in the build. The environment check is read-only and reports
+missing prerequisites, HugePages, CPU affinity and available NUMA information.
+
+Choose a CPU from the process's allowed affinity list. This example selects the
+first allowed CPU and maps it to DPDK logical lcore zero:
+
+```sh
+EAL_CPU=$(awk '/Cpus_allowed_list/ {split($2, a, /[-,]/); print a[1]}' /proc/self/status)
+./bin/flow-router -- --lcores="0@${EAL_CPU}" --no-huge --no-pci --no-shconf -m 64
+```
+
+This allocates 64 MiB of EAL memory without HugePages and disables PCI probing
+and shared configuration. It needs no NIC binding or network changes. Success
+prints DPDK version, initialization status, main lcore/count and cleanup status,
+then exits zero. Invalid EAL arguments exit nonzero with operation/error context.
+All arguments after `--` are passed to EAL; choose them deliberately. A fresh
+process is required for each probe, including after failures.
+
+```sh
+export CGO_CFLAGS_ALLOW='-include|rte_config.h'
+go test ./...
+go vet ./...
+bash -n scripts/check_env.sh
+bash -n scripts/start_codex_tmux.sh
+# Opt-in real EAL tests (success, invalid arguments, repeated-init rejection):
+FLOW_ROUTER_TEST_CPU="$EAL_CPU" go test -count=1 -v ./control/dataplane
+```
+
+The ordinary test run checks NUL rejection and skips the EAL integration test
+unless `FLOW_ROUTER_TEST_CPU` is set. No EAL behavior is mocked. The existing
+`start_codex_tmux.sh` is a development helper that may install/configure tmux;
+it is separate from the read-only environment checker.
 
 ## Why this project
 
@@ -303,7 +358,9 @@ The long-term goal is to understand both:
 
 ## Current next step
 
-Before implementation, the next design discussion will settle:
+Goal 001 is ready for ChatGPT review of the commit, ownership and acceptance
+evidence. Do not start Goal 002 until that review and the next design discussion
+settle:
 
 1. what exactly a `route`, `flow`, and `policy` mean in v0.1;
 2. which packet fields can be rewritten;
