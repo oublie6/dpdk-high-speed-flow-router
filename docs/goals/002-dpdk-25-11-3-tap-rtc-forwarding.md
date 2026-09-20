@@ -1,7 +1,7 @@
 # Goal 002：统一 DPDK 25.11.3、收敛 native C 构建，并跑通 TAP RTC 转发
 
 日期：2026-09-19  
-状态：Codex 已完成，待 ChatGPT 验收
+状态：✅ ChatGPT 验收通过
 
 ## 1. 背景
 
