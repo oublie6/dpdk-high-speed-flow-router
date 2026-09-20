@@ -358,7 +358,7 @@ Cloud Native / Cloud Network Dataplane
 
 ## 当前下一步
 
-Goal 002 已实现并提交给 ChatGPT 验收：
+Goal 002 主体已实现；ChatGPT 初审后进入 Goal 002R 修复阶段：
 
 [Goal 002：统一 DPDK 25.11.3、收敛 native C 构建，并跑通 TAP RTC 转发](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md)
 
@@ -371,6 +371,6 @@ Goal 002 已实现并提交给 ChatGPT 验收：
 5. single-lcore RTC 原样 forwarding；
 6. exact marker 端到端验证。
 
-验收通过前不开始 Goal 003。当前仍然只做软件仿真，不绑定真实 NIC。
+Goal 002R 复验通过前不开始 Goal 003。当前仍然只做软件仿真，不绑定真实 NIC。
 
 开发协作规则见 [AGENTS.md](AGENTS.md)。
