@@ -1,7 +1,7 @@
 # Goal 002R：修复 cleanup 安全边界、移除复杂 unsafe，并收敛 Go 构建环境
 
 日期：2026-09-20  
-状态：✅ Codex 已完成，待 ChatGPT 复验
+状态：✅ ChatGPT 复验通过
 
 ## 1. 背景
 
@@ -527,3 +527,31 @@ PASS: exact TAP forwarding, graceful cleanup, no test interfaces/process/temp fi
 本修复没有增加 parser、flow/route、rewrite、RCU/QSBR、RSS、multi-queue、
 multi-lcore、API、frontend、NAT、conntrack、real NIC/VFIO 或 Goal 003 内容。
 当前没有已知未解决问题；下一步仅等待 ChatGPT 复验。
+
+
+---
+
+# 12. ChatGPT 复验结论（2026-09-20）
+
+复验 commit：
+
+~~~text
+0a3fd00936d1eb908f774c85dc1d6b36689e8836
+fix: harden Goal 002 cleanup and cgo boundary
+~~~
+
+复验结果：**通过。**
+
+确认：
+
+- Go owner 显式区分 `teardownErr`，Teardown 失败时不会进入 EAL Cleanup；
+- C 的 `dp_runtime_cleanup()` 对 running worker、存活 port、started port 和 mempool 均有 `-EBUSY` 防御；
+- `TestTeardownFailureSkipsCleanup` 对 Go 失败路径进行了可控注入；
+- `TestRuntimeCleanupRejectsLiveResources` 对 C cleanup guard 的 worker/port/mempool 三类状态进行了直接断言；
+- argv 的手工 `unsafe.Pointer -> uintptr -> offset` 已移除，改为 `dp_argv_alloc/set/free_array` 小型 C helper；
+- Go 中剩余 `unsafe` 仅用于 `C.CString()` 对应的标准 C memory 释放；
+- `scripts/install_dpdk.sh` 已删除 `go env -w`，Makefile 使用项目局部 `CGO_CFLAGS_ALLOW`；
+- Goal 002 的 EAL、partial TX ownership、TAP exact marker 和 graceful cleanup 回归证据均保留；
+- 本次 commit 未引入 parser、flow/route、rewrite、RSS/multi-queue 或其他 Goal 003+ 功能。
+
+因此 Goal 002 与 Goal 002R 正式完成，可以进入 Goal 003 的设计阶段。
