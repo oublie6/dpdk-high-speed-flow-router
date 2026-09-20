@@ -6,42 +6,36 @@
 
 ## 当前状态
 
-**Goal 001 已验收通过：Go -> cgo -> project C API -> DPDK EAL init/info/cleanup。**
+**Goal 002 已由 Codex 完成，等待 ChatGPT 验收。**
 
 当前已经完成：
 
-- Go CLI 作为程序入口；
-- thin cgo wrapper；
-- 项目级 C API；
-- 真实 DPDK EAL init / runtime info / cleanup；
-- EAL argv 的 C memory ownership；
-- EAL 生命周期固定在一个 locked OS thread；
-- build / test / vet / EAL integration evidence；
-- 只读环境检查脚本。
+- DPDK 25.11.3 `/usr/local` 安装与精确版本检查；
+- `control/dataplane` 纯 Go lifecycle manager；
+- `dataplane/native` 唯一 cgo package 和 package-local C 源码；
+- long-running EAL owner thread 与 graceful stop；
+- 两个 TAP Virtual PMD、一个 C-owned mbuf pool；
+- RX port/RXQ0 -> fixed lcore RTC -> TX port/TXQ0 原样转发；
+- TX partial return 的 zero-retry/free 尾部 ownership 策略；
+- EtherType `0x88b5` 与 marker `dpdk-flow-router-goal002` 的自动端到端验证；
+- port close -> mempool free -> EAL cleanup 的真实证据。
 
 尚未实现：
 
-- mempool；
-- port / virtual PMD；
-- RX/TX queue；
 - packet parser；
 - flow/route table；
 - rewrite；
-- worker；
 - multi-queue / RSS；
 - benchmark；
 - Web API / frontend。
 
-详细边界见 [架构与 ownership](docs/architecture.md)，Goal 001 的实现与验收证据见 [Goal 001](docs/goals/001-bootstrap-go-cgo-dpdk.md)。
+详细边界见 [架构与 ownership](docs/architecture.md)，实现与验收证据见 [Goal 002](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md)。
 
 ## 当前重要约束
 
-Goal 001 的实际环境使用了 DPDK 19.11.14，但既有软件实验主线已经使用 DPDK 25.11.3。
-
-因此进入 Goal 002 前先做两件事：
-
-1. **把新项目统一到 DPDK 25.11.3**；
-2. **确定稳定的 native C dataplane 构建方式**，不让后续大量 C 文件继续依赖 `#include *.c + go build -a` 的过渡模式。
+项目当前构建基线固定为 DPDK 25.11.3。源码和运行时都会检查版本，
+`scripts/check_env.sh` 遇到其他版本直接失败。系统自带的 19.11 package 可以保留，
+但项目必须从 `/usr/local/lib/pkgconfig/libdpdk.pc` 解析到 25.11.3。
 
 当前仍然只做 software/simulation dataplane：
 
@@ -50,26 +44,29 @@ Goal 001 的实际环境使用了 DPDK 19.11.14，但既有软件实验主线已
 - 不修改默认路由或防火墙；
 - 不宣称真实 NIC、hardware RSS 或 NUMA 性能。
 
-## Goal 001：构建与 EAL 验证
+## Goal 002：构建与 TAP RTC 验证
 
-依赖 Linux、Go+cgo、GCC/Clang、make、pkg-config 和 DPDK development files。
+在 Ubuntu/Debian root 环境安装官方 DPDK 25.11.3：
 
 ~~~sh
+./scripts/install_dpdk.sh
 ./scripts/check_env.sh
+pkg-config --modversion libdpdk
 make build
 ~~~
 
-Goal 001 的旧验证环境需要：
+安装脚本从 DPDK 官方 release 下载并校验源码，使用 Meson/Ninja release build
+安装到 `/usr/local`，仅启用本 Goal 需要的 vdev、ring mempool 和 TAP driver。
+它不会绑定 PCI、配置 VFIO、修改网络、GRUB 或 HugePage。安装脚本通过
+`go env -w` 写入 anchored allowlist，只接受 DPDK pkg-config 实际输出的
+`-include`、`rte_config.h` 与 `-mrtm`，使普通 Go 命令无需手工 export。
 
-~~~sh
-export CGO_CFLAGS_ALLOW='-include|rte_config.h'
-~~~
-
-然后选择当前进程允许使用的 CPU：
+EAL 一次性回归：
 
 ~~~sh
 EAL_CPU=$(awk '/Cpus_allowed_list/ {split($2, a, /[-,]/); print a[1]}' /proc/self/status)
-./bin/flow-router -- --lcores="0@${EAL_CPU}" --no-huge --no-pci --no-shconf -m 64
+./bin/flow-router --probe -- --lcores="0@${EAL_CPU}" \
+  --no-huge --no-pci --no-shconf --no-telemetry -m 64
 ~~~
 
 成功时会打印：
@@ -80,19 +77,35 @@ EAL init succeeded: ...
 EAL cleanup succeeded
 ~~~
 
-这条链路只证明 EAL 和 Go/cgo/C 边界，不代表 dataplane 收发性能。
-
-测试：
+TAP RTC 端到端验证：
 
 ~~~sh
-export CGO_CFLAGS_ALLOW='-include|rte_config.h'
+./scripts/verify_tap_forwarding.sh
+~~~
+
+脚本动态生成两张短名称 TAP，只把本次接口设为 UP；它注入一个确定性 Ethernet
+frame，并在 TX TAP 精确比较完整 frame、EtherType 和 marker。结束时发送 SIGTERM，
+等待 worker 退出、port close、mempool free 与 EAL cleanup，并确认不遗留进程、
+接口和临时文件。它不配置 IP、route 或 firewall。
+
+完整测试：
+
+~~~sh
 go test ./...
 go vet ./...
+bash -n scripts/install_dpdk.sh
 bash -n scripts/check_env.sh
+bash -n scripts/verify_tap_forwarding.sh
 bash -n scripts/start_codex_tmux.sh
+python3 -m py_compile scripts/verify_tap_forwarding.py
 
-FLOW_ROUTER_TEST_CPU="$EAL_CPU" go test -count=1 -v ./control/dataplane
+FLOW_ROUTER_TEST_CPU="$EAL_CPU" go test -count=1 -v \
+  ./control/dataplane ./dataplane/native
 ~~~
+
+普通测试不初始化 EAL；设置 `FLOW_ROUTER_TEST_CPU` 后会运行真实 EAL 回归和
+TX partial-return ownership 测试。这里的结果只证明 software/TAP 功能正确性，
+不证明真实 NIC DMA、hardware RSS、NUMA cost、line-rate 或吞吐性能。
 
 ## 为什么做这个项目
 
@@ -345,11 +358,11 @@ Cloud Native / Cloud Network Dataplane
 
 ## 当前下一步
 
-Goal 002 已定义，当前等待 Codex 执行：
+Goal 002 已实现并提交给 ChatGPT 验收：
 
 [Goal 002：统一 DPDK 25.11.3、收敛 native C 构建，并跑通 TAP RTC 转发](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md)
 
-本阶段将在新机器完成：
+本阶段已经完成：
 
 1. DPDK 25.11.3 安装和版本锁定；
 2. package-local native C 构建组织；
@@ -358,6 +371,6 @@ Goal 002 已定义，当前等待 Codex 执行：
 5. single-lcore RTC 原样 forwarding；
 6. exact marker 端到端验证。
 
-仍然只做软件仿真，不绑定真实 NIC。
+验收通过前不开始 Goal 003。当前仍然只做软件仿真，不绑定真实 NIC。
 
 开发协作规则见 [AGENTS.md](AGENTS.md)。

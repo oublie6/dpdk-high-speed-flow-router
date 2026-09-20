@@ -1,7 +1,7 @@
 # Goal 002：统一 DPDK 25.11.3、收敛 native C 构建，并跑通 TAP RTC 转发
 
 日期：2026-09-19  
-状态：⬜ 待 Codex 实现
+状态：Codex 已完成，待 ChatGPT 验收
 
 ## 1. 背景
 
@@ -823,3 +823,137 @@ DPDK 25.11.3 installation evidence
 只有 Goal 002 验收通过后，再设计 Goal 003：
 
 > Ethernet / IPv4 / TCP / UDP parser 与 packet metadata。
+
+---
+
+# 16. Codex 实现记录（2026-09-20）
+
+## 16.1 Gate A：实际环境与安装结果
+
+任务开始时工作区为空、分支为 `main`；`git fetch origin` 后通过
+`git pull --ff-only origin main` 从 `5060e14` 快进到远端最新 `c3d4e00`，
+没有覆盖或丢弃本地修改。随后完整阅读 AGENTS、README、architecture 与本 Goal。
+
+初始 `pkg-config --modversion libdpdk` 为 `19.11.14`，因此先停止 dataplane
+实现。新增并实际执行 `./scripts/install_dpdk.sh`：从官方 release 下载
+`dpdk-25.11.3.tar.xz`，SHA-256 为
+`3719acc586b310c4f60ba230683bf4f1e12c6f2f5bee11f7c01b1bbd0ded7490`，
+源码解压到 `/opt/src/dpdk-25.11.3`，通过 Meson/Ninja release shared build
+安装到 `/usr/local` 并执行 `ldconfig`。系统 19.11 package 保留，没有卸载。
+
+首次配置发现 Meson 使用系统 Python、无法导入 venv 中的 `pyelftools`；修正为
+Meson 与 `pyelftools` 共用 `/opt/dpdk-build-tools` venv 后，安装成功。最终：
+
+~~~text
+Ubuntu 20.04.4 LTS
+kernel 5.4.0-216-generic
+Go 1.13.8
+GCC 9.4.0
+Clang unavailable（GCC 已满足构建要求）
+Meson 1.5.2
+Ninja 1.10.0
+Python 3.8.10
+DPDK 25.11.3
+pkg-config directory /usr/local/lib/pkgconfig
+CPU 8 / allowed 0-7
+NUMA nodes 1
+HugePages_Total 0
+/dev/net/tun 存在且为 character device
+~~~
+
+实际执行并通过：
+
+~~~bash
+./scripts/install_dpdk.sh
+./scripts/check_env.sh
+pkg-config --modversion libdpdk
+pkg-config --cflags libdpdk
+pkg-config --libs libdpdk
+~~~
+
+`pkg-config --modversion libdpdk` 精确输出 `25.11.3`；prefix 为 `/usr/local`。
+安装脚本还通过 `go env -w` 写入 anchored `CGO_CFLAGS_ALLOW`，只放行该版本
+pkg-config 实际输出的 `-include`、`rte_config.h` 与 `-mrtm`，因此普通
+`go build/test/vet` 不依赖当前 shell 的手工 export。
+安装与测试没有 bind/unbind PCI、调用 `dpdk-devbind.py`、配置真实 VFIO、修改
+route/firewall/管理网卡/Kubernetes/Cilium/GRUB 或 HugePage。
+
+## 16.2 Gate B：实现内容
+
+- cgo 与所有项目 native `.c/.h` 收敛到 `dataplane/native`；删除 Goal 001 的
+  `#include ../../.../*.c` adapter，普通 `go build` 不再使用 `-a`。
+- `control/dataplane` 为纯 Go lifecycle manager；一个 locked OS thread 完成
+  init、setup、blocking RTC run、teardown、stats 与 EAL cleanup。
+- 创建 4096 mbuf / cache 128 / default buffer size 的单个 C-owned pool。
+- 按 vdev name 查找两个 TAP port；每个 port 为 TAP compatibility 配置 RXQ0/TXQ0，
+  hot path 只 poll RX port/RXQ0，并只发送到 TX port/TXQ0。
+- worker 执行 burst RX -> 单次 burst TX；TX 未接受尾部立即 free，zero retry，
+  hot path 不打印日志，也不跨 cgo 逐包调用。
+- C11 atomic stop 只传递停止请求；worker 返回后依次 stop/close port、验证 pool
+  in-use 为 0、free pool、cleanup EAL。
+- 自动验证脚本生成唯一 TAP 名，注入 EtherType `0x88b5` 与固定 marker，精确比较
+  TX TAP 的完整 60-byte frame，并在成功、setup 失败与 timeout 路径清理资源。
+- 使用真实 EAL/mempool 模拟 4 个 mbuf 的 partial return（sent=2），验证尾部被
+  application free、前两个仍归 PMD，模拟 PMD 完成后 pool in-use 回到 0。
+
+本机 Go runtime 已占用 realtime signals，TAP PMD 输出 `No Rx trigger signal
+available`，并退回非阻塞 polling。exact marker 与 cleanup 均正常；这是软件环境
+限制，不构成 forwarding correctness 失败，也不用于性能结论。
+
+## 16.3 实际验收命令与结果
+
+~~~bash
+grep -R 'import "C"' -n --include='*.go' .
+make build
+go test -count=1 ./...
+go vet ./...
+bash -n scripts/install_dpdk.sh
+bash -n scripts/check_env.sh
+bash -n scripts/verify_tap_forwarding.sh
+bash -n scripts/start_codex_tmux.sh
+python3 -m py_compile scripts/verify_tap_forwarding.py
+
+EAL_CPU=$(awk '/Cpus_allowed_list/ {split($2, a, /[-,]/); print a[1]}' /proc/self/status)
+FLOW_ROUTER_TEST_CPU="$EAL_CPU" go test -count=1 -v \
+  ./control/dataplane ./dataplane/native
+./scripts/verify_tap_forwarding.sh
+~~~
+
+build、普通 test、vet、Shell/Python 语法检查均退出 0。源码搜索只在
+`dataplane/native/binding_linux.go` 找到 `import "C"`。真实 EAL 回归确认
+25.11.3 init/info/cleanup 成功、未知参数非零退出、同进程第二次 init 被拒绝；
+partial-return ownership 测试通过。
+
+另外先清空 Go build cache，再直接运行普通 `go test -count=1 ./...`，结果通过；
+随后修改 `dataplane/native/dp_worker.c` 中的注释并执行普通 `go build -x`，trace
+明确出现 `gcc ... -c dp_worker.c`。这证明 C source change 由 package dependency
+正常触发编译，不依赖 `go build -a`。
+
+TAP 验证退出 0，关键输出为：
+
+~~~text
+exact marker captured: EtherType=0x88b5 marker=dpdk-flow-router-goal002 frame_bytes=60
+DPDK version: DPDK 25.11.3
+rx device: net_tap_rx -> port 0 RXQ0 desc=256
+tx device: net_tap_tx -> port 1 TXQ0 desc=256
+stats: rx=2 tx_accepted=2 tx_unsent=0 drop=0
+teardown: ports_closed=2 pool_in_use=0 pool_freed=true
+EAL cleanup succeeded
+PASS: exact TAP forwarding, graceful cleanup, no test interfaces/process/temp files remain
+~~~
+
+`rx=2` 包含 host 在 TAP link-up 后产生的背景 frame；验收依据是捕获到完整一致的
+EtherType + marker frame，而不是计数器恰好等于 1。统计仍满足
+`rx == tx_accepted + tx_unsent` 与 `drop == tx_unsent`。
+
+另外执行 `--bad-device` setup 失败与 `--skip-injection --timeout 1` 超时负向测试，
+两者均按预期非零退出；随后检查没有 `flow-router` process，也没有任何
+`dfrx*` / `dftx*` interface。没有生成或提交 pcap、二进制、巨大日志、secret
+或 host-specific credential。
+
+## 16.4 当前边界与下一步
+
+本次只证明 software/TAP functional path，不证明真实 NIC DMA、hardware RSS、
+NUMA performance、line-rate、latency 或 throughput。Goal 003+ 的 parser、
+flow/route、rewrite、RCU/QSBR、RSS/multi-queue/multi-lcore、API/Web、NAT 与
+conntrack 均未实现。下一步仅为 ChatGPT 验收本 focused commit；不继续 Goal 003。

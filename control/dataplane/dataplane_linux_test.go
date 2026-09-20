@@ -22,17 +22,13 @@ func TestEALLifecycle(t *testing.T) {
 			args = append(args, "--flow-router-invalid-eal-option")
 		}
 		info, err := Probe(args)
-		if mode == "invalid" {
-			if err == nil || !strings.Contains(err.Error(), "EAL init") {
-				t.Fatalf("expected contextual init error, got %v", err)
-			}
-		} else {
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !info.Initialized || info.MainLcore != 0 || info.LcoreCount != 1 || info.Version == "" {
-				t.Fatalf("unexpected runtime info: %+v", info)
-			}
+		// DPDK 25.11.3 对未知参数会在 rte_eal_init 内直接退出进程，
+		// invalid case 正常不会执行到这里；外层进程断言退出码和诊断文本。
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.Initialized || info.MainLcore != 0 || info.LcoreCount != 1 || info.Version != "DPDK 25.11.3" {
+			t.Fatalf("unexpected runtime info: %+v", info)
 		}
 		if _, err := Probe(args); err == nil {
 			t.Fatal("second init attempt was accepted")
@@ -45,6 +41,12 @@ func TestEALLifecycle(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestEALLifecycle$", "-test.v")
 			cmd.Env = append(os.Environ(), "FLOW_ROUTER_TEST_CHILD="+mode)
 			out, err := cmd.CombinedOutput()
+			if mode == "invalid" {
+				if err == nil || !strings.Contains(string(out), "unknown argument --flow-router-invalid-eal-option") {
+					t.Fatalf("expected DPDK argparse failure, got %v\n%s", err, out)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("%v\n%s", err, out)
 			}

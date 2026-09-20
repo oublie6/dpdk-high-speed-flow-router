@@ -4,20 +4,31 @@ set -u
 
 missing=0
 
-for tool in go gcc clang pkg-config; do
+for tool in go gcc clang pkg-config meson ninja python3 ip; do
     if command -v "$tool" >/dev/null 2>&1; then
         if [[ "$tool" == go ]]; then
             go version
+        elif [[ "$tool" == ip ]]; then
+            ip -Version
         else
             "$tool" --version 2>/dev/null | head -n 1
         fi
     else
         printf '%s: unavailable\n' "$tool"
-        if [[ "$tool" == go || "$tool" == pkg-config ]]; then
+        if [[ "$tool" != gcc && "$tool" != clang ]]; then
             missing=1
         fi
     fi
 done
+
+if command -v go >/dev/null 2>&1; then
+    allow=${CGO_CFLAGS_ALLOW:-}
+    go_env_file=$(go env GOENV)
+    if [[ -z "$allow" && -r "$go_env_file" ]]; then
+        allow=$(awk -F= '$1 == "CGO_CFLAGS_ALLOW" {sub(/^[^=]*=/, ""); print}' "$go_env_file")
+    fi
+    printf 'Go CGO_CFLAGS_ALLOW: %s\n' "${allow:-unavailable}"
+fi
 
 if ! command -v gcc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then
     echo 'A C compiler (gcc or clang) is required.' >&2
@@ -25,8 +36,14 @@ if ! command -v gcc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then
 fi
 
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libdpdk; then
-    printf 'DPDK version: '
-    pkg-config --modversion libdpdk
+    actual=$(pkg-config --modversion libdpdk)
+    printf 'DPDK version: %s\n' "$actual"
+    if [[ "$actual" != 25.11.3 ]]; then
+        echo '本项目要求 DPDK 精确为 25.11.3；请先执行 scripts/install_dpdk.sh 并检查 PKG_CONFIG_PATH。' >&2
+        missing=1
+    fi
+    printf 'DPDK prefix: %s\n' "$(pkg-config --variable=prefix libdpdk)"
+    printf 'DPDK pkg-config directory: %s\n' "$(pkg-config --variable=pcfiledir libdpdk)"
     printf 'DPDK cflags: '
     pkg-config --cflags libdpdk
     printf 'DPDK libs: '
@@ -35,6 +52,17 @@ else
     echo 'libdpdk unavailable: install DPDK development files or set PKG_CONFIG_PATH.' >&2
     missing=1
 fi
+
+printf '\nTUN/TAP device:\n'
+if [[ -c /dev/net/tun ]]; then
+    ls -l /dev/net/tun
+else
+    echo '/dev/net/tun 不存在；TAP 验证需要此设备。' >&2
+    missing=1
+fi
+printf '\nDistro / kernel:\n'
+if [[ -r /etc/os-release ]]; then cat /etc/os-release; fi
+uname -r
 
 printf '\nHugePage state:\n'
 if [[ -r /proc/meminfo ]]; then

@@ -1,10 +1,133 @@
-// Package dataplane 封装 Go 控制面与 C/DPDK runtime 之间的粗粒度边界。
+// Package dataplane 是纯 Go lifecycle manager，packet hot path 全部留在 native。
 package dataplane
 
-// Info 是完全由 Go 持有的运行时快照，不包含 C pointer。
-type Info struct {
-	Initialized bool
-	MainLcore   uint
-	LcoreCount  uint
-	Version     string
+import (
+	"fmt"
+	"runtime"
+	"strings"
+	"sync"
+
+	"github.com/oublie6/dpdk-high-speed-flow-router/dataplane/native"
+)
+
+type Info = native.Info
+type Stats = native.Stats
+
+type Config struct {
+	EALArgs            []string
+	RXDevice, TXDevice string
+	Probe              bool
+}
+
+// EAL 是 process-global、不可重入的资源；即使 init 失败，也不允许第二次尝试。
+var lifecycle struct {
+	sync.Mutex
+	attempted bool
+}
+
+type Runtime struct {
+	ready, done   chan struct{}
+	info          Info
+	stats         Stats
+	startErr, err error
+}
+
+func validate(cfg Config) error {
+	noPCI := false
+	for _, arg := range cfg.EALArgs {
+		if strings.IndexByte(arg, 0) >= 0 {
+			return fmt.Errorf("EAL argument contains a NUL byte")
+		}
+		if arg == "--no-pci" {
+			noPCI = true
+		}
+	}
+	if !noPCI {
+		return fmt.Errorf("software-only runtime requires --no-pci")
+	}
+	if !cfg.Probe && (cfg.RXDevice == "" || cfg.TXDevice == "" || cfg.RXDevice == cfg.TXDevice) {
+		return fmt.Errorf("RX/TX device names must be distinct and nonempty")
+	}
+	if strings.IndexByte(cfg.RXDevice, 0) >= 0 || strings.IndexByte(cfg.TXDevice, 0) >= 0 {
+		return fmt.Errorf("device name contains a NUL byte")
+	}
+	return nil
+}
+
+// Start 立即返回 handle；Ready 等待初始化结果，Stop 可在初始化期间请求，Wait 等待清理。
+func Start(cfg Config) (*Runtime, error) {
+	if err := validate(cfg); err != nil {
+		return nil, err
+	}
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
+	if lifecycle.attempted {
+		return nil, fmt.Errorf("EAL lifecycle: only one initialization attempt per process is supported")
+	}
+	lifecycle.attempted = true
+	// caller 返回后可以修改原始 slice；manager 拥有自己的参数快照。
+	cfg.EALArgs = append([]string(nil), cfg.EALArgs...)
+	r := &Runtime{ready: make(chan struct{}), done: make(chan struct{})}
+	go r.owner(cfg)
+	return r, nil
+}
+
+func combine(first, next error) error {
+	if first == nil {
+		return next
+	}
+	if next == nil {
+		return first
+	}
+	return fmt.Errorf("%v; %w", first, next)
+}
+
+func (r *Runtime) owner(cfg Config) {
+	// 不 Unlock：goroutine 退出时 Go 回收此 OS thread，避免 EAL affinity 污染调度器。
+	runtime.LockOSThread()
+	err := native.Init(cfg.EALArgs)
+	initialized := err == nil
+	if err == nil {
+		r.info, err = native.GetInfo()
+		if err == nil && r.info.LcoreCount != 1 {
+			err = fmt.Errorf("exactly one EAL lcore is required")
+		}
+	}
+	if err == nil && !cfg.Probe {
+		err = native.Setup(cfg.RXDevice, cfg.TXDevice)
+		if err == nil {
+			r.info, err = native.GetInfo()
+		}
+	}
+	r.startErr = err
+	close(r.ready) // channel close 发布初始化结果，Ready 之后读取不与 owner 竞争。
+	if err == nil && !cfg.Probe {
+		err = native.Run()
+	}
+	if initialized {
+		// Run 返回就是 worker 已停止；此后仍在同一个 owner thread 按依赖顺序清理。
+		err = combine(err, native.Teardown())
+		var statsErr error
+		r.stats, statsErr = native.GetStats()
+		err = combine(err, statsErr)
+		err = combine(err, native.Cleanup())
+	}
+	r.err = err
+	close(r.done)
+}
+
+func (r *Runtime) Ready() (Info, error)  { <-r.ready; return r.info, r.startErr }
+func (r *Runtime) Stop()                 { native.RequestStop() }
+func (r *Runtime) Done() <-chan struct{} { return r.done }
+func (r *Runtime) Wait() (Stats, error)  { <-r.done; return r.stats, r.err }
+
+// Probe 保留 Goal 001 的同步 EAL 回归入口，使用同一个 owner/lifecycle 实现。
+func Probe(args []string) (Info, error) {
+	r, err := Start(Config{EALArgs: args, Probe: true})
+	if err != nil {
+		return Info{}, err
+	}
+	info, _ := r.Ready()
+	_, err = r.Wait()
+	return info, err
 }
