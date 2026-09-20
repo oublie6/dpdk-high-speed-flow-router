@@ -1,11 +1,40 @@
 package dataplane
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 )
+
+type failingTeardownAPI struct {
+	cleanupCalls int
+}
+
+func (*failingTeardownAPI) Teardown() error { return errors.New("injected teardown failure") }
+func (*failingTeardownAPI) GetStats() (Stats, error) {
+	return Stats{PortsClosed: 1, PoolInUse: 1}, nil
+}
+func (api *failingTeardownAPI) Cleanup() error {
+	api.cleanupCalls++
+	return nil
+}
+
+func TestTeardownFailureSkipsCleanup(t *testing.T) {
+	api := &failingTeardownAPI{}
+	r := &Runtime{}
+	err := r.finishLifecycle(api, nil)
+	if err == nil || !strings.Contains(err.Error(), "injected teardown failure") {
+		t.Fatalf("expected injected teardown failure, got %v", err)
+	}
+	if api.cleanupCalls != 0 {
+		t.Fatalf("Cleanup called %d times after Teardown failure", api.cleanupCalls)
+	}
+	if r.stats.PortsClosed != 1 || r.stats.PoolInUse != 1 {
+		t.Fatalf("stats were not retained after Teardown failure: %+v", r.stats)
+	}
+}
 
 // 每个 EAL case 都需要独立进程：cleanup 后不能在同一进程再次初始化。
 // 真实 EAL 集成测试需要显式设置 FLOW_ROUTER_TEST_CPU，避免普通 unit test

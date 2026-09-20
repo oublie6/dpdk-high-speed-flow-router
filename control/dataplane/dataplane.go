@@ -82,6 +82,37 @@ func combine(first, next error) error {
 	return fmt.Errorf("%v; %w", first, next)
 }
 
+// cleanupAPI 只描述 worker 返回后的生命周期操作，便于用可控 fake 验证失败路径。
+// 生产路径仍直接调用 native package，不改变 Go/C 的粗粒度边界。
+type cleanupAPI interface {
+	Teardown() error
+	GetStats() (Stats, error)
+	Cleanup() error
+}
+
+type nativeCleanupAPI struct{}
+
+func (nativeCleanupAPI) Teardown() error          { return native.Teardown() }
+func (nativeCleanupAPI) GetStats() (Stats, error) { return native.GetStats() }
+func (nativeCleanupAPI) Cleanup() error           { return native.Cleanup() }
+
+func (r *Runtime) finishLifecycle(api cleanupAPI, runErr error) error {
+	// Teardown 失败意味着 port 或 mempool 可能仍被 DPDK 持有。此时不能进入
+	// rte_eal_cleanup；保留资源到进程退出，由操作系统完成最终回收。
+	teardownErr := api.Teardown()
+
+	var statsErr error
+	r.stats, statsErr = api.GetStats()
+	err := combine(runErr, teardownErr)
+	err = combine(err, statsErr)
+	if teardownErr != nil {
+		return err
+	}
+
+	cleanupErr := api.Cleanup()
+	return combine(err, cleanupErr)
+}
+
 func (r *Runtime) owner(cfg Config) {
 	// 不 Unlock：goroutine 退出时 Go 回收此 OS thread，避免 EAL affinity 污染调度器。
 	runtime.LockOSThread()
@@ -106,11 +137,7 @@ func (r *Runtime) owner(cfg Config) {
 	}
 	if initialized {
 		// Run 返回就是 worker 已停止；此后仍在同一个 owner thread 按依赖顺序清理。
-		err = combine(err, native.Teardown())
-		var statsErr error
-		r.stats, statsErr = native.GetStats()
-		err = combine(err, statsErr)
-		err = combine(err, native.Cleanup())
+		err = r.finishLifecycle(nativeCleanupAPI{}, err)
 	}
 	r.err = err
 	close(r.done)

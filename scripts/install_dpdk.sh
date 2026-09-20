@@ -60,8 +60,4 @@ actual=$(pkg-config --modversion libdpdk)
     echo "DPDK 解析为 $actual；请检查 PKG_CONFIG_PATH 是否覆盖 /usr/local/lib/pkgconfig。" >&2
     exit 1
 }
-# Go 1.13 的 cgo 默认拒绝 DPDK pkg-config 中的两个合法 flag。
-# 写入精确 anchored allowlist，使普通 go build/test 无需每次手工 export；
-# 这里只放行 DPDK 25.11.3 实际输出的 token，不允许任意 compiler flag。
-go env -w 'CGO_CFLAGS_ALLOW=^(-include|rte_config\.h|-mrtm)$'
 printf 'DPDK version: %s\npkg-config directory: %s\n' "$actual" "$(pkg-config --variable=pcfiledir libdpdk)"

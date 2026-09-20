@@ -6,6 +6,7 @@ package native
 #cgo CFLAGS: -std=c11
 #include <stdlib.h>
 #include "dp_api.h"
+#include "dp_binding.h"
 #include "dp_test.h"
 */
 import "C"
@@ -34,7 +35,7 @@ type Stats struct {
 // EAL 可能重排 argv，因此保存原始分配地址直到 cleanup；没有 Go pointer 逃逸。
 var arguments struct {
 	strings []*C.char
-	array   unsafe.Pointer
+	array   **C.char
 }
 
 func status(operation string, rc C.int) error {
@@ -50,22 +51,23 @@ func Init(args []string) error {
 	for i, arg := range args {
 		arguments.strings[i+1] = C.CString(arg)
 	}
-	arguments.array = C.calloc(C.size_t(len(args)+2), C.size_t(unsafe.Sizeof(uintptr(0))))
+	// 多分配一个 NULL 结尾元素；calloc 由 C helper 完成初始化。
+	arguments.array = C.dp_argv_alloc(C.size_t(len(args) + 2))
 	if arguments.array == nil {
 		freeArguments()
 		return fmt.Errorf("allocate EAL argv: out of memory")
 	}
 	for i, p := range arguments.strings {
-		*(**C.char)(unsafe.Pointer(uintptr(arguments.array) + uintptr(i)*unsafe.Sizeof(p))) = p
+		C.dp_argv_set(arguments.array, C.size_t(i), p)
 	}
 	// init 失败是终止状态：部分 EAL state 可能仍引用 argv，保留到进程退出。
-	return status("EAL init", C.dp_runtime_init(C.int(len(args)+1), (**C.char)(arguments.array)))
+	return status("EAL init", C.dp_runtime_init(C.int(len(args)+1), arguments.array))
 }
 func freeArguments() {
 	for _, p := range arguments.strings {
 		C.free(unsafe.Pointer(p))
 	}
-	C.free(arguments.array)
+	C.dp_argv_free_array(arguments.array)
 	arguments.strings, arguments.array = nil, nil
 }
 func GetInfo() (Info, error) {
@@ -108,4 +110,15 @@ func Cleanup() error {
 // testPartialTXOwnership 是 package 内测试入口，不向控制面暴露逐包 API。
 func testPartialTXOwnership() error {
 	return status("partial TX ownership test", C.dp_test_tx_partial_ownership())
+}
+
+const (
+	testLiveWorker  = 1
+	testLivePort    = 2
+	testLiveMempool = 3
+)
+
+// testCleanupGuard 直接返回 cleanup 的 errno，供 package 测试断言防御边界。
+func testCleanupGuard(resource int) error {
+	return status("EAL cleanup guard test", C.dp_test_runtime_cleanup_guard(C.int(resource)))
 }

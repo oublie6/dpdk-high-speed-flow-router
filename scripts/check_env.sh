@@ -22,12 +22,7 @@ for tool in go gcc clang pkg-config meson ninja python3 ip; do
 done
 
 if command -v go >/dev/null 2>&1; then
-    allow=${CGO_CFLAGS_ALLOW:-}
-    go_env_file=$(go env GOENV)
-    if [[ -z "$allow" && -r "$go_env_file" ]]; then
-        allow=$(awk -F= '$1 == "CGO_CFLAGS_ALLOW" {sub(/^[^=]*=/, ""); print}' "$go_env_file")
-    fi
-    printf 'Go CGO_CFLAGS_ALLOW: %s\n' "${allow:-unavailable}"
+    printf 'Process CGO_CFLAGS_ALLOW: %s\n' "${CGO_CFLAGS_ALLOW:-not set; Makefile supplies the project value}"
 fi
 
 if ! command -v gcc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then

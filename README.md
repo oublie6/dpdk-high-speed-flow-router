@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**Goal 002 已由 Codex 完成，等待 ChatGPT 验收。**
+**Goal 002R 已由 Codex 完成，等待 ChatGPT 复验。**
 
 当前已经完成：
 
@@ -18,7 +18,10 @@
 - RX port/RXQ0 -> fixed lcore RTC -> TX port/TXQ0 原样转发；
 - TX partial return 的 zero-retry/free 尾部 ownership 策略；
 - EtherType `0x88b5` 与 marker `dpdk-flow-router-goal002` 的自动端到端验证；
-- port close -> mempool free -> EAL cleanup 的真实证据。
+- port close -> mempool free -> EAL cleanup 的真实证据；
+- Teardown 失败后禁止进入 EAL cleanup，并在 C 层拒绝清理仍有存活资源的 runtime；
+- cgo argv 通过小型 C helper 装配，Go 不再计算 `char **` 元素地址；
+- DPDK 安装不再修改用户级 Go 环境，构建 allowlist 由 Makefile 局部提供。
 
 尚未实现：
 
@@ -29,7 +32,9 @@
 - benchmark；
 - Web API / frontend。
 
-详细边界见 [架构与 ownership](docs/architecture.md)，实现与验收证据见 [Goal 002](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md)。
+详细边界见 [架构与 ownership](docs/architecture.md)，实现与验收证据见
+[Goal 002](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md) 和
+[Goal 002R 修复记录](docs/goals/002r-cleanup-cgo-readability.md)。
 
 ## 当前重要约束
 
@@ -57,9 +62,9 @@ make build
 
 安装脚本从 DPDK 官方 release 下载并校验源码，使用 Meson/Ninja release build
 安装到 `/usr/local`，仅启用本 Goal 需要的 vdev、ring mempool 和 TAP driver。
-它不会绑定 PCI、配置 VFIO、修改网络、GRUB 或 HugePage。安装脚本通过
-`go env -w` 写入 anchored allowlist，只接受 DPDK pkg-config 实际输出的
-`-include`、`rte_config.h` 与 `-mrtm`，使普通 Go 命令无需手工 export。
+它不会绑定 PCI、配置 VFIO、修改网络、GRUB、HugePage 或用户级 Go 环境。
+Makefile 在项目进程内提供旧版 cgo 所需的精确 allowlist，只允许 DPDK
+pkg-config 实际输出的 `-include`、`rte_config.h` 与 `-mrtm`。
 
 EAL 一次性回归：
 
@@ -88,19 +93,29 @@ frame，并在 TX TAP 精确比较完整 frame、EtherType 和 marker。结束�
 等待 worker 退出、port close、mempool free 与 EAL cleanup，并确认不遗留进程、
 接口和临时文件。它不配置 IP、route 或 firewall。
 
-完整测试：
+推荐通过项目入口构建和测试：
 
 ~~~sh
-go test ./...
-go vet ./...
+make build
+make test
+make vet
 bash -n scripts/install_dpdk.sh
 bash -n scripts/check_env.sh
 bash -n scripts/verify_tap_forwarding.sh
 bash -n scripts/start_codex_tmux.sh
 python3 -m py_compile scripts/verify_tap_forwarding.py
 
-FLOW_ROUTER_TEST_CPU="$EAL_CPU" go test -count=1 -v \
-  ./control/dataplane ./dataplane/native
+FLOW_ROUTER_TEST_CPU="$EAL_CPU" make test
+~~~
+
+需要直接运行 Go 命令时，显式提供项目局部环境变量：
+
+~~~sh
+CGO_CFLAGS_ALLOW='^(-include|rte_config\.h|-mrtm)$' go test -count=1 ./...
+CGO_CFLAGS_ALLOW='^(-include|rte_config\.h|-mrtm)$' go vet ./...
+FLOW_ROUTER_TEST_CPU="$EAL_CPU" \
+  CGO_CFLAGS_ALLOW='^(-include|rte_config\.h|-mrtm)$' go test -count=1 -v \
+    ./control/dataplane ./dataplane/native
 ~~~
 
 普通测试不初始化 EAL；设置 `FLOW_ROUTER_TEST_CPU` 后会运行真实 EAL 回归和

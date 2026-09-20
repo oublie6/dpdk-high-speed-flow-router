@@ -1,11 +1,32 @@
 package native
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"runtime"
+	"syscall"
 	"testing"
 )
+
+func TestRuntimeCleanupRejectsLiveResources(t *testing.T) {
+	cases := []struct {
+		name     string
+		resource int
+	}{
+		{name: "worker", resource: testLiveWorker},
+		{name: "port", resource: testLivePort},
+		{name: "mempool", resource: testLiveMempool},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := testCleanupGuard(tc.resource)
+			if !errors.Is(err, syscall.EBUSY) {
+				t.Fatalf("cleanup guard returned %v, want EBUSY", err)
+			}
+		})
+	}
+}
 
 // partial return 测试必须在真实 EAL/mempool 上运行，也必须与其他 EAL case
 // 隔离到新进程，因为同一进程不允许第二次初始化 EAL。

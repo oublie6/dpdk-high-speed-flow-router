@@ -27,6 +27,7 @@ Goal 001 的旧假设是通过 `control/dataplane/runtime_linux.c` include 外�
 
 ~~~text
 binding_linux.go       cgo 与 C memory 转换
+dp_binding.c/.h        argv 数组分配、设置与释放 helper
 dp_api.h               粗粒度项目 API
 dp_internal.h          C-only runtime state
 dp_runtime.c           EAL 与状态快照
@@ -39,6 +40,10 @@ dp_test.h              package 内 ownership 测试钩子
 cgo 会把同目录 `.c` 作为 package source 正常跟踪，因此普通 `go build` / `go test`
 可以发现 C 改动，不再需要 `go build -a`。当前规模不值得增加 `libflowdp.a/.so`
 或第二套项目 Meson build；DPDK flags 仍由 `pkg-config libdpdk` 提供。
+
+旧版 cgo 对 DPDK pkg-config flags 的精确 allowlist 由 Makefile export，仅作用于
+`make build/test/vet` 的项目进程。安装脚本不写用户级 persistent Go environment；
+直接运行 Go 命令时由调用者显式设置同一 allowlist。
 
 `control/dataplane` 不 import C，也不接触 mbuf。它只导入 `dataplane/native`，
 管理 config、ready、stop、wait 和 owner goroutine。源码编译期与运行时均锁定
@@ -59,7 +64,8 @@ native.Init(EAL argv)
 -> worker returns / 已无 pending mbuf
 -> native.Teardown()            port stop + close，再检查/free pool
 -> native.GetStats()
--> native.Cleanup()             rte_eal_cleanup 最后执行
+-> Teardown 成功：native.Cleanup()  最后执行 rte_eal_cleanup
+-> Teardown 失败：返回错误           不调用 cleanup，由进程退出兜底
 -> locked goroutine exits
 ~~~
 
@@ -71,10 +77,17 @@ EAL 是 process-global 且不能重新初始化。任何 init 尝试后，同一
 第二次 lifecycle；正常集成测试使用独立子进程隔离 case。DPDK 25.11.3 的
 argparse 遇到未知 EAL 参数会直接非零退出子进程，回归测试按这个真实行为断言。
 
+Go owner 显式保存 `teardownErr`。它仍会在状态允许时读取最终 stats，但只有
+Teardown 成功才调用 Cleanup。C 的 `dp_runtime_cleanup()` 也会检查 `running`、
+port ownership/start 状态和 pool 指针；任何资源仍存活都返回 `-EBUSY`。这层
+防御避免未来调用方绕过 Go 顺序后直接进入 `rte_eal_cleanup()`。
+
 ## 4. argv 与跨边界 ownership
 
 `rte_eal_init()` 可以修改 argv，所以 binding 为 argv array 与所有 string 分配
-C memory，并另存原始 string 地址。cleanup 成功后逐一释放；init 或 cleanup
+C memory，并另存原始 string 地址。`dp_argv_alloc/set/free_array` 三个小型 C helper
+负责 C 数组布局，Go 只表达分配、逐项设置和释放，不再使用 `uintptr + offset`。
+cleanup 成功后逐一释放；init 或 cleanup
 终止性失败时保留这批小内存到进程退出，避免释放可能仍被部分 EAL state 引用的
 地址。没有 Go pointer 长期保存到 C。
 

@@ -957,3 +957,9 @@ EtherType + marker frame，而不是计数器恰好等于 1。统计仍满足
 NUMA performance、line-rate、latency 或 throughput。Goal 003+ 的 parser、
 flow/route、rewrite、RCU/QSBR、RSS/multi-queue/multi-lcore、API/Web、NAT 与
 conntrack 均未实现。下一步仅为 ChatGPT 验收本 focused commit；不继续 Goal 003。
+
+## 16.5 Goal 002R 验收修复
+
+Goal 002 验收发现的 cleanup 顺序、cgo argv 可读性和用户级 Go 环境副作用，已由
+[Goal 002R](002r-cleanup-cgo-readability.md) 单独修复并保留完整实现与测试记录。
+本节只链接修复记录，不改写 Goal 002 的原始实现历史。

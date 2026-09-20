@@ -1,7 +1,7 @@
 # Goal 002R：修复 cleanup 安全边界、移除复杂 unsafe，并收敛 Go 构建环境
 
 日期：2026-09-20  
-状态：⬜ 待 Codex 实现
+状态：✅ Codex 已完成，待 ChatGPT 复验
 
 ## 1. 背景
 
@@ -347,6 +347,9 @@ grep -R 'go env -w' -n scripts Makefile README.md docs || true
 make build
 make test
 make vet
+GOENV=off make build
+GOENV=off make test
+GOENV=off make vet
 bash -n scripts/install_dpdk.sh
 bash -n scripts/check_env.sh
 bash -n scripts/verify_tap_forwarding.sh
@@ -421,3 +424,106 @@ fix: harden Goal 002 cleanup and cgo boundary
 - 全部实际验收命令和结果；
 - TAP exact marker 回归结果；
 - 是否还有未解决问题。
+
+---
+
+# 11. Codex 实现记录（2026-09-20）
+
+## 11.1 同步结果
+
+修改前依次执行了：
+
+~~~bash
+git status --short
+git branch --show-current
+git fetch origin
+git pull --ff-only origin main
+~~~
+
+工作区为空、分支为 `main`；远端从 `f6c02c2` 快进到 `29bbfa2`，没有 divergence
+或 conflict。同步后重新完整阅读 AGENTS、README、架构、Goal 002 和本 Goal。
+
+## 11.2 Teardown 与 Cleanup
+
+Go owner 新增直白的 `finishLifecycle()` 顺序：显式保存 `teardownErr`，随后在状态
+允许时读取 stats；只有 Teardown 成功才调用 Cleanup。Teardown 失败时保留错误并
+让进程退出兜底，不再进入正常 EAL cleanup。
+
+`TestTeardownFailureSkipsCleanup` 使用可控 fake 返回固定 teardown error，并记录
+Cleanup 调用次数。测试断言错误被返回、stats 仍被保存且 Cleanup 调用次数严格为 0，
+不依赖 TAP PMD 的偶发 close failure。
+
+C 的 `dp_runtime_cleanup()` 现在检查 worker running、两个 port 的 owned/started
+状态和 pool 指针，任一资源仍存活都返回 `-EBUSY`。package 内测试钩子分别临时
+构造 worker、port、mempool 存活状态并直接调用该函数；
+`TestRuntimeCleanupRejectsLiveResources` 的三个子测试都确认 Go error 可匹配
+`syscall.EBUSY`。
+
+## 11.3 argv 与项目构建环境
+
+新增 `dp_binding.c/.h`，用 `dp_argv_alloc()`、`dp_argv_set()` 和
+`dp_argv_free_array()` 封装 `char **` 数组布局。Go binding 现在只负责分配、逐项
+设置和释放；已移除 `unsafe.Pointer -> uintptr -> offset` 运算。`unsafe` 仅保留
+`C.CString()` 对应的标准 `C.free(unsafe.Pointer(p))` 转换。
+
+安装脚本已删除用户级 persistent Go environment 写入。Makefile 统一 export 精确
+`CGO_CFLAGS_ALLOW`，并新增 `make test`、`make vet`；README 推荐使用三个 make
+入口，直接 Go 命令则显式传入项目局部变量。`check_env.sh` 只报告当前进程变量，
+不读取或修改 GOENV。
+
+## 11.4 实际验收记录
+
+以下命令均实际执行并退出 0：
+
+~~~bash
+git diff --check
+make build
+make test
+make vet
+bash -n scripts/install_dpdk.sh
+bash -n scripts/check_env.sh
+bash -n scripts/verify_tap_forwarding.sh
+python3 -m py_compile scripts/verify_tap_forwarding.py
+
+CGO_CFLAGS_ALLOW='^(-include|rte_config\.h|-mrtm)$' go test -count=1 ./...
+CGO_CFLAGS_ALLOW='^(-include|rte_config\.h|-mrtm)$' go vet ./...
+./scripts/check_env.sh
+
+CGO_CFLAGS_ALLOW='^(-include|rte_config\.h|-mrtm)$' go test -count=1 -v \
+  ./control/dataplane -run '^TestTeardownFailureSkipsCleanup$'
+CGO_CFLAGS_ALLOW='^(-include|rte_config\.h|-mrtm)$' go test -count=1 -v \
+  ./dataplane/native -run '^TestRuntimeCleanupRejectsLiveResources$'
+
+EAL_CPU=$(awk '/Cpus_allowed_list/ {split($2, a, /[-,]/); print a[1]}' /proc/self/status)
+FLOW_ROUTER_TEST_CPU="$EAL_CPU" \
+  CGO_CFLAGS_ALLOW='^(-include|rte_config\.h|-mrtm)$' go test -count=1 -v \
+    ./control/dataplane ./dataplane/native
+
+./scripts/verify_tap_forwarding.sh
+grep -R 'go env -w' -n scripts Makefile README.md docs || true
+~~~
+
+真实 EAL 回归确认 init/info/cleanup、非法参数拒绝和同进程重复 init 限制均未回归；
+partial TX ownership 测试通过。环境检查确认 DPDK 精确为 25.11.3，且未设置进程级
+allowlist 时只给出诊断，不失败。关闭用户级 GOENV 后三个 make 入口也全部通过，
+证明项目构建不依赖 persistent Go environment。
+
+TAP exact marker 回归退出 0，关键结果为：
+
+~~~text
+exact marker captured: EtherType=0x88b5 marker=dpdk-flow-router-goal002 frame_bytes=60
+stats: rx=2 tx_accepted=2 tx_unsent=0 drop=0
+teardown: ports_closed=2 pool_in_use=0 pool_freed=true
+EAL cleanup succeeded
+PASS: exact TAP forwarding, graceful cleanup, no test interfaces/process/temp files remain
+~~~
+
+脚本退出后又独立检查，没有残留 `flow-router` 进程、`dfrx*` / `dftx*` TAP 或
+`dfr-goal002-*` 临时目录。grep 只命中 Goal 文档对旧行为及本检查命令的历史说明；
+`scripts/install_dpdk.sh`、Makefile 和 README 的当前执行流程均不再写用户级环境。
+
+## 11.5 当前边界
+
+本修复没有增加 parser、flow/route、rewrite、RCU/QSBR、RSS、multi-queue、
+multi-lcore、API、frontend、NAT、conntrack、real NIC/VFIO 或 Goal 003 内容。
+当前没有已知未解决问题；下一步仅等待 ChatGPT 复验。

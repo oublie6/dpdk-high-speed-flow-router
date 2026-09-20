@@ -1,4 +1,4 @@
-.PHONY: build check-build-env clean
+.PHONY: build test vet check-build-env clean
 
 # 系统 DPDK 的 pkg-config 会输出强制 include 参数。
 # 旧版 cgo 默认拒绝该参数，因此只精确放行这些 token，不允许任意 CFLAGS。
@@ -6,6 +6,12 @@ export CGO_CFLAGS_ALLOW = ^(-include|rte_config\.h|-mrtm)$$
 
 build: check-build-env
 	CGO_ENABLED=1 go build -o bin/flow-router ./cmd/flow-router
+
+test: check-build-env
+	CGO_ENABLED=1 go test -count=1 ./...
+
+vet: check-build-env
+	CGO_ENABLED=1 go vet ./...
 
 check-build-env:
 	@command -v go >/dev/null || { echo "Go is required" >&2; exit 1; }

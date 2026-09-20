@@ -1,4 +1,5 @@
 #include "dp_internal.h"
+#include "dp_test.h"
 #include <errno.h>
 #include <string.h>
 #include <rte_eal.h>
@@ -56,9 +57,45 @@ int dp_runtime_cleanup(void)
 {
     if (!dp.initialized)
         return -ENODEV;
-    if (dp.running)
+    /* teardown 未完整结束时，EAL 仍可能被 worker、ethdev 或 mempool 引用。 */
+    if (dp.running || dp.pool || dp.owned[0] || dp.owned[1] ||
+        dp.started[0] || dp.started[1])
         return -EBUSY;
     /* teardown 失败也会报告错误并终止进程；不尝试第二次 EAL 生命周期。 */
     dp.initialized = false;
     return rte_eal_cleanup();
+}
+
+int dp_test_runtime_cleanup_guard(int resource)
+{
+    bool initialized = dp.initialized;
+    bool running = dp.running;
+    bool owned = dp.owned[0];
+    struct rte_mempool *pool = dp.pool;
+    int ret;
+
+    if (resource != DP_TEST_LIVE_WORKER && resource != DP_TEST_LIVE_PORT &&
+        resource != DP_TEST_LIVE_MEMPOOL)
+        return -EINVAL;
+
+    dp.initialized = true;
+    switch (resource) {
+    case DP_TEST_LIVE_WORKER:
+        dp.running = true;
+        break;
+    case DP_TEST_LIVE_PORT:
+        dp.owned[0] = true;
+        break;
+    case DP_TEST_LIVE_MEMPOOL:
+        /* cleanup guard 只比较 NULL，不会解引用这个测试哨兵。 */
+        dp.pool = (struct rte_mempool *)1;
+        break;
+    }
+
+    ret = dp_runtime_cleanup();
+    dp.initialized = initialized;
+    dp.running = running;
+    dp.owned[0] = owned;
+    dp.pool = pool;
+    return ret;
 }
