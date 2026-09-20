@@ -483,24 +483,31 @@ Codex 不得主动越过 Goal scope。
 Goal 001 ✅
 Go -> cgo -> project C API -> DPDK EAL
 
-Goal 002 已定义，等待 Codex 执行：
-1. 在新机器统一 DPDK 到 25.11.3
-2. 收敛 package-local native C 构建组织
-3. 跑通双 TAP Virtual PMD + 单 RXQ/TXQ + 单 lcore RTC 原样转发
+Goal 002 ✅
+DPDK 25.11.3
++ package-local native C
++ 双 TAP Virtual PMD
++ C-owned mempool
++ 单 RXQ/TXQ
++ single-lcore RTC 原样转发
++ exact marker 端到端验证
+
+Goal 002R ✅
++ Teardown 失败禁止 EAL cleanup
++ C cleanup resource guard
++ argv C helper，移除复杂 unsafe pointer arithmetic
++ 构建环境不再依赖 go env -w
 ~~~
 
-当前阶段仍然只做 software/simulation dataplane，不绑定真实 NIC，不修改服务器管理网络。
+当前仍然只证明 software/simulation dataplane 功能正确性，不绑定真实 NIC，
+不宣称 hardware RSS、NUMA performance、line-rate 或吞吐性能。
 
 ## 17. 当前执行任务
 
-当前只执行：
+Goal 002 / Goal 002R 已验收完成。
 
-`docs/goals/002r-cleanup-cgo-readability.md`
+当前没有进行中的实现 Goal。下一步应由 ChatGPT 与用户先设计 Goal 003：
 
-这是 Goal 002 的验收修复任务，只处理：
+> Ethernet / IPv4 / TCP / UDP parser 与 packet metadata。
 
-1. Teardown 失败后的 cleanup 安全边界；
-2. argv 装配中的复杂 unsafe 指针运算；
-3. install 脚本对 Go 全局环境的副作用。
-
-Codex 必须严格按照 Goal 002R 执行，完成后停止继续开发，等待 ChatGPT 复验，不进入 Goal 003。
+在 Goal 003 文档和验收标准明确之前，Codex 不应自行继续开发。
