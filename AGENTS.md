@@ -495,6 +495,12 @@ Goal 002 已定义，等待 Codex 执行：
 
 当前只执行：
 
-`docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md`
+`docs/goals/002r-cleanup-cgo-readability.md`
 
-Codex 必须严格按照 Goal 002 的 Gate A / Gate B 和 scope 执行，完成后停止继续开发，等待 ChatGPT 验收。
+这是 Goal 002 的验收修复任务，只处理：
+
+1. Teardown 失败后的 cleanup 安全边界；
+2. argv 装配中的复杂 unsafe 指针运算；
+3. install 脚本对 Go 全局环境的副作用。
+
+Codex 必须严格按照 Goal 002R 执行，完成后停止继续开发，等待 ChatGPT 复验，不进入 Goal 003。
