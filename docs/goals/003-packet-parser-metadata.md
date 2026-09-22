@@ -1,7 +1,7 @@
 # Goal 003：Ethernet / IPv4 / TCP / UDP Parser 与 Packet Metadata
 
 日期：2026-09-23  
-状态：⬜ 待 Codex 实现
+状态：✅ Codex 已完成，待 ChatGPT 验收
 
 ## 1. 背景与目标
 
@@ -345,3 +345,130 @@ dataplane: add IPv4 TCP UDP packet parser
 ~~~
 
 最终报告：commit SHA、修改文件、metadata 结构、parse result、multi-segment 策略、parser tests、stats ownership 调整、Goal002/002R 回归、TAP Goal003 exact marker/malformed drop、未解决问题。
+
+---
+
+## 20. Codex 实现记录（2026-09-22）
+
+### 20.1 同步与范围
+
+修改前依次执行：
+
+~~~bash
+git status --short
+git branch --show-current
+git fetch origin
+git pull --ff-only origin main
+~~~
+
+工作区为空、分支为 `main`；远端从 `0a3fd00` 快进到 `551bccb`，没有 divergence
+或 conflict。同步后完整阅读 AGENTS、README、架构、Goal 002、Goal 002R 和本 Goal。
+本次没有加入 lookup、route/flow table、rewrite、RSS、multi-queue、multi-lcore 或
+其他 Goal 004+ 能力。
+
+### 20.2 Parser 与 metadata
+
+新增 `dp_packet.h`、`dp_parser.h`、`dp_parser.c`。最终 metadata 为：
+
+~~~c
+struct dp_packet_meta {
+    uint16_t ether_type;
+    uint32_t src_ipv4;
+    uint32_t dst_ipv4;
+    uint8_t l4_proto;
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint16_t l2_len;
+    uint16_t l3_len;
+    uint16_t l4_len;
+    uint16_t l4_offset;
+};
+~~~
+
+EtherType、IPv4 address、TCP/UDP port 均通过 DPDK endian helper 转为 host byte
+order。parse result 使用 `DP_PARSE_OK`、`DP_PARSE_UNSUPPORTED`、
+`DP_PARSE_MALFORMED` 三态。
+
+parser 拆为 packet/Ethernet、IPv4、TCP、UDP 小函数。IPv4 IHL 与 TCP data offset
+按字段计算；IPv4 total length 同时检查不得小于 IHL 且不得超出实际连续 frame。
+IPv4 fragment、非 IPv4、非 TCP/UDP 和 multi-segment 返回 unsupported；截断、
+非法 version/IHL/total length/TCP offset/UDP length 返回 malformed。不验证 checksum。
+
+本阶段只支持 `nb_segs == 1`。parser 在任何 header 解引用前先拒绝 multi-segment，
+并用 single segment `data_len` 限制所有 offset/length；没有使用
+`rte_pktmbuf_read()`、linearize 或跨 segment copy。parser 不修改、不 free mbuf，
+hot path 没有 heap allocation、锁或逐包日志。
+
+### 20.3 Worker、stats 与 ownership
+
+worker 在 RX burst 后立即执行 `stats.rx += n`，逐包 parse；OK mbuf 复用 RX pointer
+array 原地压缩后进入一次 TX burst，unsupported/malformed mbuf 由 worker 立即 free
+并增加对应分类与 drop。`dp_complete_tx()` 不再增加 RX，只处理 TX accepted/unsent、
+unsent free 与 drop，因此 parser drop 不会从 RX 统计中消失，也不会 double free。
+
+stats 增加 `parse_ok`、`parse_unsupported`、`parse_malformed`，CLI 同步输出这些字段。
+partial TX 测试也改为按 Goal 003 语义预置 RX/parse_ok，再验证 TX 未接受尾部 ownership
+及三条守恒中的 RX 分类和 parse_ok/TX 关系。
+
+### 20.4 Deterministic parser tests
+
+新增 package-private `dp_parser_test.c` fixture helper，不需要 EAL 或 mempool，不暴露为
+生产 control-plane API。实际测试覆盖：valid TCP、valid UDP、IPv4 IHL > 5、TCP
+data offset > 5、非 IPv4、unsupported L4、IPv4 fragment、Ethernet truncated、IPv4
+truncated、非法 IPv4 version、IHL < 5、total length < IHL、total length 超出 frame、
+TCP truncated、TCP offset < 5、TCP header 超出 IPv4 payload、UDP truncated、UDP
+length < 8、UDP length 超出 IPv4 payload 和 multi-segment，共 20 个 fixture。
+
+四个 valid case 对完整 metadata 做断言，包括固定 src/dst IPv4、src/dst port、
+EtherType、L4 protocol、header length、L4 offset 和 host byte order。
+
+### 20.5 Goal003 TAP 回归
+
+验证器先注入一个 `version=4, IHL=4` 的 60-byte malformed IPv4 frame，再注入固定
+地址/端口、payload 为 `dpdk-flow-router-goal003` 的 66-byte Ethernet/IPv4/UDP
+frame。TX TAP 对合法 frame 做完整逐字节比较，并把捕获到 malformed frame 视为失败。
+
+一次真实运行的关键证据为：
+
+~~~text
+exact marker captured: EtherType=0x0800 IPv4/UDP marker=dpdk-flow-router-goal003 frame_bytes=66
+stats: rx=3 parse_ok=1 parse_unsupported=1 parse_malformed=1 tx_accepted=1 tx_unsent=0 drop=2
+teardown: ports_closed=2 pool_in_use=0 pool_freed=true
+EAL cleanup succeeded
+PASS: exact Goal003 forwarding, malformed drop, stats conservation, graceful cleanup, no test interfaces/process/temp files remain
+~~~
+
+其中一个 unsupported packet 来自 TAP link-up 背景流量。结果满足三条守恒关系，
+并证明 deterministic malformed frame 被 drop；脚本没有把 RX 固定为某个值。
+
+### 20.6 实际验收记录
+
+以下命令均实际执行并退出 0：
+
+~~~bash
+git diff --check
+make build
+make test
+make vet
+
+bash -n scripts/install_dpdk.sh
+bash -n scripts/check_env.sh
+bash -n scripts/verify_tap_forwarding.sh
+python3 -m py_compile scripts/verify_tap_forwarding.py
+
+./scripts/check_env.sh
+./scripts/verify_tap_forwarding.sh
+
+CGO_CFLAGS_ALLOW='^(-include|rte_config\.h|-mrtm)$' go test -count=1 -v \
+  ./dataplane/native -run '^TestPacketParser'
+
+EAL_CPU=$(awk '/Cpus_allowed_list/ {split($2, a, /[-,]/); print a[1]}' /proc/self/status)
+FLOW_ROUTER_TEST_CPU="$EAL_CPU" \
+  CGO_CFLAGS_ALLOW='^(-include|rte_config\.h|-mrtm)$' go test -count=1 -v \
+    ./control/dataplane ./dataplane/native
+~~~
+
+真实 EAL 回归确认 init/info/cleanup、invalid EAL args 和同进程 repeated init rejection
+通过；partial TX ownership、Teardown failure skips Cleanup、C cleanup worker/port/mempool
+guard 全部通过。DPDK 精确为 25.11.3。TAP 结束后无 `flow-router`、`dfrx*` / `dftx*`
+或 `dfr-goal003-*` 残留。当前没有已知未解决问题；下一步只等待 ChatGPT 验收。

@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**Goal 002 / Goal 002R 已验收通过，当前进入 Goal 003 Parser 阶段。**
+**Goal 003 已由 Codex 完成，当前等待 ChatGPT 验收。**
 
 当前已经完成：
 
@@ -21,11 +21,15 @@
 - port close -> mempool free -> EAL cleanup 的真实证据；
 - Teardown 失败后禁止进入 EAL cleanup，并在 C 层拒绝清理仍有存活资源的 runtime；
 - cgo argv 通过小型 C helper 装配，Go 不再计算 `char **` 元素地址；
-- DPDK 安装不再修改用户级 Go 环境，构建 allowlist 由 Makefile 局部提供。
+- DPDK 安装不再修改用户级 Go 环境，构建 allowlist 由 Makefile 局部提供；
+- C/DPDK hot path 中的 Ethernet / IPv4 / TCP / UDP parser；
+- host byte order packet metadata，以及 IHL / TCP data offset 可变长度处理；
+- unsupported / malformed packet 立即 drop，parse OK packet 原样转发；
+- single-segment 明确支持、multi-segment 明确拒绝的 parser 边界；
+- 20 个 deterministic parser fixture 与 Goal003 IPv4/UDP TAP 正负向回归。
 
 尚未实现：
 
-- packet parser；
 - flow/route table；
 - rewrite；
 - multi-queue / RSS；
@@ -88,10 +92,12 @@ TAP RTC 端到端验证：
 ./scripts/verify_tap_forwarding.sh
 ~~~
 
-脚本动态生成两张短名称 TAP，只把本次接口设为 UP；它注入一个确定性 Ethernet
-frame，并在 TX TAP 精确比较完整 frame、EtherType 和 marker。结束时发送 SIGTERM，
-等待 worker 退出、port close、mempool free 与 EAL cleanup，并确认不遗留进程、
-接口和临时文件。它不配置 IP、route 或 firewall。
+脚本动态生成两张短名称 TAP，只把本次接口设为 UP；它先注入一个 IHL=4 的
+malformed IPv4 frame，再注入合法 Ethernet/IPv4/UDP Goal003 marker。验证器要求
+malformed frame 不被转发，并在 TX TAP 对合法 frame 做完整逐字节比较，同时检查
+parser/TX/drop 三条统计守恒。结束时发送 SIGTERM，等待 worker 退出、port close、
+mempool free 与 EAL cleanup，并确认不遗留进程、接口和临时文件。它不配置 IP、
+route 或 firewall。
 
 推荐通过项目入口构建和测试：
 
@@ -118,8 +124,9 @@ FLOW_ROUTER_TEST_CPU="$EAL_CPU" \
     ./control/dataplane ./dataplane/native
 ~~~
 
-普通测试不初始化 EAL；设置 `FLOW_ROUTER_TEST_CPU` 后会运行真实 EAL 回归和
-TX partial-return ownership 测试。这里的结果只证明 software/TAP 功能正确性，
+普通测试会运行不依赖 EAL 的 deterministic parser fixture；设置
+`FLOW_ROUTER_TEST_CPU` 后还会运行真实 EAL 回归和 TX partial-return ownership
+测试。这里的结果只证明 software/TAP 功能正确性，
 不证明真实 NIC DMA、hardware RSS、NUMA cost、line-rate 或吞吐性能。
 
 ## 为什么做这个项目
@@ -373,7 +380,7 @@ Cloud Native / Cloud Network Dataplane
 
 ## 当前下一步
 
-Goal 002 / Goal 002R 已正式验收通过：
+Goal 002 / Goal 002R 已正式验收通过，Goal 003 已由 Codex 完成并等待验收：
 
 [Goal 002：统一 DPDK 25.11.3、收敛 native C 构建，并跑通 TAP RTC 转发](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md)
 
@@ -386,11 +393,10 @@ Goal 002 / Goal 002R 已正式验收通过：
 5. single-lcore RTC 原样 forwarding；
 6. exact marker 端到端验证。
 
-当前 Goal：
-
 [Goal 003：Ethernet / IPv4 / TCP / UDP Parser 与 Packet Metadata](docs/goals/003-packet-parser-metadata.md)
 
-本阶段只做 parser + metadata：parse 成功仍原样 forwarding，unsupported/malformed packet drop。
-不做 flow/route lookup、rewrite、RSS 或多核。仍然只做软件仿真，不绑定真实 NIC。
+本阶段实现 parser + metadata：parse 成功仍原样 forwarding，unsupported/malformed
+packet drop。没有实现 flow/route lookup、rewrite、RSS 或多核；仍然只做软件仿真，
+不绑定真实 NIC。下一步只等待 ChatGPT 验收，不开始 Goal 004。
 
 开发协作规则见 [AGENTS.md](AGENTS.md)。

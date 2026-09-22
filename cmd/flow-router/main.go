@@ -42,7 +42,10 @@ func run() error {
 		return err
 	}
 	if !*probe {
-		fmt.Printf("stats: rx=%d tx_accepted=%d tx_unsent=%d drop=%d\n", stats.RX, stats.TXAccepted, stats.TXUnsent, stats.Drop)
+		fmt.Printf("stats: rx=%d parse_ok=%d parse_unsupported=%d parse_malformed=%d "+
+			"tx_accepted=%d tx_unsent=%d drop=%d\n", stats.RX, stats.ParseOK,
+			stats.ParseUnsupported, stats.ParseMalformed, stats.TXAccepted,
+			stats.TXUnsent, stats.Drop)
 		fmt.Printf("teardown: ports_closed=%d pool_in_use=%d pool_freed=%t\n", stats.PortsClosed, stats.PoolInUse, stats.PoolFreed)
 	}
 	fmt.Println("EAL cleanup succeeded")

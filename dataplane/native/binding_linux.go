@@ -27,9 +27,12 @@ type Info struct {
 	SocketID                       int
 }
 type Stats struct {
-	RX, TXAccepted, TXUnsent, Drop uint64
-	PortsClosed, PoolInUse         uint
-	PoolFreed                      bool
+	RX                         uint64
+	ParseOK, ParseUnsupported  uint64
+	ParseMalformed             uint64
+	TXAccepted, TXUnsent, Drop uint64
+	PortsClosed, PoolInUse     uint
+	PoolFreed                  bool
 }
 
 // EAL 可能重排 argv，因此保存原始分配地址直到 cleanup；没有 Go pointer 逃逸。
@@ -96,7 +99,9 @@ func GetStats() (Stats, error) {
 	if err := status("dataplane stats", C.dp_dataplane_get_stats(&s)); err != nil {
 		return Stats{}, err
 	}
-	return Stats{RX: uint64(s.rx), TXAccepted: uint64(s.tx_accepted), TXUnsent: uint64(s.tx_unsent),
+	return Stats{RX: uint64(s.rx), ParseOK: uint64(s.parse_ok),
+		ParseUnsupported: uint64(s.parse_unsupported), ParseMalformed: uint64(s.parse_malformed),
+		TXAccepted: uint64(s.tx_accepted), TXUnsent: uint64(s.tx_unsent),
 		Drop: uint64(s.drop), PortsClosed: uint(s.ports_closed), PoolInUse: uint(s.pool_in_use), PoolFreed: s.pool_freed != 0}, nil
 }
 func Cleanup() error {
@@ -121,4 +126,52 @@ const (
 // testCleanupGuard 直接返回 cleanup 的 errno，供 package 测试断言防御边界。
 func testCleanupGuard(resource int) error {
 	return status("EAL cleanup guard test", C.dp_test_runtime_cleanup_guard(C.int(resource)))
+}
+
+type testPacketMeta struct {
+	EtherType        uint16
+	SrcIPv4, DstIPv4 uint32
+	L4Proto          uint8
+	SrcPort, DstPort uint16
+	L2Len, L3Len     uint16
+	L4Len, L4Offset  uint16
+}
+
+const (
+	parseOK          = int(C.DP_PARSE_OK)
+	parseUnsupported = int(C.DP_PARSE_UNSUPPORTED)
+	parseMalformed   = int(C.DP_PARSE_MALFORMED)
+
+	fixtureValidTCP           = int(C.DP_TEST_PARSE_VALID_TCP)
+	fixtureValidUDP           = int(C.DP_TEST_PARSE_VALID_UDP)
+	fixtureIPv4Options        = int(C.DP_TEST_PARSE_IPV4_OPTIONS)
+	fixtureTCPOptions         = int(C.DP_TEST_PARSE_TCP_OPTIONS)
+	fixtureNonIPv4            = int(C.DP_TEST_PARSE_NON_IPV4)
+	fixtureUnsupportedL4      = int(C.DP_TEST_PARSE_UNSUPPORTED_L4)
+	fixtureIPv4Fragment       = int(C.DP_TEST_PARSE_IPV4_FRAGMENT)
+	fixtureEthernetTruncated  = int(C.DP_TEST_PARSE_ETHERNET_TRUNCATED)
+	fixtureIPv4Truncated      = int(C.DP_TEST_PARSE_IPV4_TRUNCATED)
+	fixtureInvalidIPv4Version = int(C.DP_TEST_PARSE_INVALID_IPV4_VERSION)
+	fixtureInvalidIHL         = int(C.DP_TEST_PARSE_INVALID_IHL)
+	fixtureInvalidTotalLength = int(C.DP_TEST_PARSE_INVALID_TOTAL_LENGTH)
+	fixtureTotalBeyondFrame   = int(C.DP_TEST_PARSE_TOTAL_LENGTH_BEYOND_FRAME)
+	fixtureTCPTruncated       = int(C.DP_TEST_PARSE_TCP_TRUNCATED)
+	fixtureInvalidTCPOffset   = int(C.DP_TEST_PARSE_INVALID_TCP_OFFSET)
+	fixtureTCPBeyondPayload   = int(C.DP_TEST_PARSE_TCP_HEADER_BEYOND_PAYLOAD)
+	fixtureUDPTruncated       = int(C.DP_TEST_PARSE_UDP_TRUNCATED)
+	fixtureInvalidUDPLength   = int(C.DP_TEST_PARSE_INVALID_UDP_LENGTH)
+	fixtureUDPBeyondPayload   = int(C.DP_TEST_PARSE_UDP_BEYOND_PAYLOAD)
+	fixtureMultiSegment       = int(C.DP_TEST_PARSE_MULTI_SEGMENT)
+)
+
+func testParseFixture(fixture int) (int, testPacketMeta) {
+	var meta C.struct_dp_packet_meta
+	result := int(C.dp_test_parse_fixture(C.int(fixture), &meta))
+	return result, testPacketMeta{
+		EtherType: uint16(meta.ether_type), SrcIPv4: uint32(meta.src_ipv4),
+		DstIPv4: uint32(meta.dst_ipv4), L4Proto: uint8(meta.l4_proto),
+		SrcPort: uint16(meta.src_port), DstPort: uint16(meta.dst_port),
+		L2Len: uint16(meta.l2_len), L3Len: uint16(meta.l3_len),
+		L4Len: uint16(meta.l4_len), L4Offset: uint16(meta.l4_offset),
+	}
 }

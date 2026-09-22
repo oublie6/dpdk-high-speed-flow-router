@@ -12,8 +12,37 @@ import tempfile
 import time
 import uuid
 
-MARKER = b"dpdk-flow-router-goal002"
-ETHERTYPE = 0x88B5
+MARKER = b"dpdk-flow-router-goal003"
+ETHERTYPE = 0x0800
+SRC_IP = "192.0.2.1"
+DST_IP = "198.51.100.2"
+SRC_PORT = 12345
+DST_PORT = 23456
+
+
+def build_valid_frame():
+    """构造无需 checksum 验证的确定性 Ethernet/IPv4/UDP frame。"""
+    ethernet = bytes.fromhex("020000000002020000000001") + struct.pack("!H", ETHERTYPE)
+    udp_length = 8 + len(MARKER)
+    ipv4_length = 20 + udp_length
+    ipv4 = struct.pack(
+        "!BBHHHBBH4s4s",
+        0x45, 0, ipv4_length, 0x3003, 0, 64, socket.IPPROTO_UDP, 0,
+        socket.inet_aton(SRC_IP), socket.inet_aton(DST_IP),
+    )
+    udp = struct.pack("!HHHH", SRC_PORT, DST_PORT, udp_length, 0)
+    return ethernet + ipv4 + udp + MARKER
+
+
+def build_malformed_frame():
+    """IHL=4 小于 IPv4 最小值；补齐到 Ethernet 最小 frame 长度便于精确识别。"""
+    ethernet = bytes.fromhex("020000000002020000000001") + struct.pack("!H", ETHERTYPE)
+    ipv4 = struct.pack(
+        "!BBHHHBBH4s4s",
+        0x44, 0, 20, 0x3004, 0, 64, socket.IPPROTO_UDP, 0,
+        socket.inet_aton(SRC_IP), socket.inet_aton(DST_IP),
+    )
+    return (ethernet + ipv4).ljust(60, b"\x00")
 
 
 def main():
@@ -68,7 +97,7 @@ def main():
                 raise RuntimeError("graceful stop 超时，已强制回收测试子进程")
 
     # 临时日志在成功与失败后都删除；异常时先打印必要诊断，不提交原始日志。
-    with tempfile.TemporaryDirectory(prefix="dfr-goal002-") as temp:
+    with tempfile.TemporaryDirectory(prefix="dfr-goal003-") as temp:
         log_path = Path(temp) / "router.log"
         with log_path.open("w+") as log:
             try:
@@ -96,11 +125,12 @@ def main():
                 capture.bind((tx_iface, 0))
                 injector = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
                 injector.bind((rx_iface, 0))
-                # 确定性的 60 字节 Ethernet frame（不含 FCS），无 parser/IP 依赖。
-                frame = bytes.fromhex("020000000002020000000001") + struct.pack("!H", ETHERTYPE)
-                frame += MARKER.ljust(46, b"\x00")
+                frame = build_valid_frame()
+                malformed_frame = build_malformed_frame()
                 if not args.skip_injection:
                     injector.settimeout(remaining())
+                    if injector.send(malformed_frame) != len(malformed_frame):
+                        raise RuntimeError("raw socket 未完整注入 malformed frame")
                     if injector.send(frame) != len(frame):
                         raise RuntimeError("raw socket 未完整注入 frame")
                 while True:
@@ -108,23 +138,38 @@ def main():
                     packet, address = capture.recvfrom(65535)
                     if address[2] == socket.PACKET_OUTGOING:
                         continue
-                    if len(packet) >= 14 and packet[12:14] == struct.pack("!H", ETHERTYPE):
-                        if packet != frame:
-                            raise AssertionError("TX EtherType 命中，但完整 frame/marker 不一致")
-                        print("exact marker captured: EtherType=0x88b5 marker=" + MARKER.decode()
-                              + " frame_bytes=" + str(len(packet)), flush=True)
-                        break
+                    if packet == malformed_frame:
+                        raise AssertionError("malformed IPv4 frame 被错误转发")
+                    if MARKER not in packet:
+                        continue
+                    if packet != frame:
+                        raise AssertionError("TX marker 命中，但完整 IPv4/UDP frame 不一致")
+                    print("exact marker captured: EtherType=0x0800 IPv4/UDP marker="
+                          + MARKER.decode() + " frame_bytes=" + str(len(packet)), flush=True)
+                    break
                 process.send_signal(signal.SIGTERM)
                 process.wait(timeout=remaining())
                 if process.returncode != 0:
                     raise RuntimeError("router 非正常退出: " + str(process.returncode))
                 log_text = log_path.read_text()
-                match = re.search(r"stats: rx=(\d+) tx_accepted=(\d+) tx_unsent=(\d+) drop=(\d+)", log_text)
+                match = re.search(
+                    r"stats: rx=(\d+) parse_ok=(\d+) parse_unsupported=(\d+) "
+                    r"parse_malformed=(\d+) tx_accepted=(\d+) tx_unsent=(\d+) drop=(\d+)",
+                    log_text,
+                )
                 if not match:
                     raise AssertionError("缺少最终 stats")
-                rx, tx, unsent, drop = map(int, match.groups())
-                if not (rx >= 1 and tx >= 1 and rx == tx + unsent and drop == unsent):
-                    raise AssertionError("stats 不满足 mbuf ownership 守恒")
+                rx, parse_ok, unsupported, malformed, tx, unsent, drop = map(int, match.groups())
+                if malformed < 1:
+                    raise AssertionError("deterministic malformed frame 未计入 parse_malformed")
+                if parse_ok < 1 or tx < 1:
+                    raise AssertionError("合法 Goal003 frame 未进入 TX")
+                if rx != parse_ok + unsupported + malformed:
+                    raise AssertionError("rx parser 分类守恒失败")
+                if parse_ok != tx + unsent:
+                    raise AssertionError("parse_ok TX ownership 守恒失败")
+                if drop != unsupported + malformed + unsent:
+                    raise AssertionError("drop ownership 守恒失败")
                 if "teardown: ports_closed=2 pool_in_use=0 pool_freed=true" not in log_text:
                     raise AssertionError("缺少 port close / pool 归还与释放证据")
                 if "EAL cleanup succeeded" not in log_text:
@@ -159,7 +204,8 @@ def main():
         print(log_text, end="")
     if error is not None:
         raise RuntimeError(str(error) or type(error).__name__)
-    print("PASS: exact TAP forwarding, graceful cleanup, no test interfaces/process/temp files remain")
+    print("PASS: exact Goal003 forwarding, malformed drop, stats conservation, "
+          "graceful cleanup, no test interfaces/process/temp files remain")
 
 
 if __name__ == "__main__":

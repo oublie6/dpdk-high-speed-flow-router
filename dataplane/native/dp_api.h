@@ -12,7 +12,8 @@ struct dp_runtime_info {
     int socket_id;
 };
 struct dp_stats {
-    uint64_t rx, tx_accepted, tx_unsent, drop;
+    uint64_t rx, parse_ok, parse_unsupported, parse_malformed;
+    uint64_t tx_accepted, tx_unsent, drop;
     unsigned int ports_closed, pool_in_use;
     int pool_freed;
 };

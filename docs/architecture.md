@@ -1,8 +1,8 @@
-# 架构说明：Goal 002 TAP RTC Dataplane
+# 架构说明：Goal 003 TAP RTC Dataplane 与 Packet Parser
 
 ## 1. 当前实现
 
-Goal 002 在 DPDK 25.11.3 上形成第一条 long-running packet path：
+Goal 003 在 Goal 002 long-running packet path 中加入 C/DPDK parser：
 
 ~~~text
 Go CLI / signal handler
@@ -11,11 +11,13 @@ control/dataplane        纯 Go lifecycle manager
         |
 dataplane/native         唯一 cgo package + package-local C
         |
-DPDK EAL -> TAP RX/RXQ0 -> fixed owner lcore -> TAP TX/TXQ0
+DPDK EAL -> TAP RX/RXQ0 -> fixed owner lcore
+         -> Ethernet/IPv4/TCP/UDP parse -> TAP TX/TXQ0
 ~~~
 
-worker 只执行 `rte_eth_rx_burst()`、一次 `rte_eth_tx_burst()` 和未发送尾部释放。
-当前没有 parser、lookup、rewrite、RSS、multi-queue 或 multi-lcore。
+worker 在每次 RX burst 后先记录 RX，再逐包解析。parse OK 的 mbuf 在原 RX pointer
+数组中压缩后执行一次 TX burst；unsupported/malformed mbuf 立即由 worker free。
+当前没有 lookup、rewrite、RSS、multi-queue 或 multi-lcore。
 
 ## 2. 构建组织
 
@@ -33,8 +35,11 @@ dp_internal.h          C-only runtime state
 dp_runtime.c           EAL 与状态快照
 dp_port.c              port / queue / mempool lifecycle
 dp_worker.c            RTC loop 与 atomic stop
+dp_packet.h            metadata 与 parse result
+dp_parser.c/.h         Ethernet/IPv4/TCP/UDP parser
+dp_parser_test.c       package 内 deterministic parser fixture
 dp_tx.c / dp_tx.h      TX ownership 完成逻辑
-dp_test.h              package 内 ownership 测试钩子
+dp_test.h              package 内 parser/ownership 测试钩子
 ~~~
 
 cgo 会把同目录 `.c` 作为 package source 正常跟踪，因此普通 `go build` / `go test`
@@ -122,18 +127,40 @@ worker 已返回
 
 任一 port close 失败时不释放 pool，进程以错误退出，避免 PMD use-after-free。
 
-## 6. RX/TX mbuf ownership
+## 6. Parser、metadata 与 mbuf ownership
+
+`dp_parse_packet()` 只接受 single-segment mbuf，不修改也不释放 packet。它先检查
+`nb_segs == 1`，再以当前 segment 的 `data_len` 为连续内存边界；multi-segment
+直接返回 `DP_PARSE_UNSUPPORTED`，本阶段不使用 `rte_pktmbuf_read()`、linearize
+或跨 segment copy。
+
+parser 将 EtherType、IPv4 src/dst、TCP/UDP src/dst port 全部转为 host byte order。
+metadata 同时记录 L2/L3/L4 header length 与 L4 offset。IPv4 IHL 和 TCP data offset
+按 packet 字段计算，不假定 header 固定为 20 bytes。IPv4 fragment、非 IPv4 与
+非 TCP/UDP 属于 unsupported；header 截断和非法 length/version/offset 属于
+malformed。parser hot path 没有 heap allocation、锁或逐包日志。
 
 每个 burst 的 ownership 转移为：
 
 ~~~text
 rte_eth_rx_burst 返回 [0,n)       application owns
+parse unsupported/malformed       worker 立即 free
+parse OK                          原地压缩到 [0,tx_count)
 rte_eth_tx_burst 接受 [0,sent)    ownership 转给 TX PMD
-未接受 [sent,n)                   application 仍 owns，立即 free
+TX 未接受 [sent,tx_count)         application 仍 owns，立即 free
 ~~~
 
 当前采用 zero-retry policy：只调用一次 TX，不做无限 retry，也不做软件 TX buffer。
-`dp_complete_tx()` 同时更新 `rx`、`tx_accepted`、`tx_unsent`、`drop` 并释放尾部。
+`dp_complete_tx()` 只更新 `tx_accepted`、`tx_unsent`、`drop` 并释放 TX 未接受尾部；
+RX 与 parser 分类由 worker 在 parse 阶段更新，避免 parse drop 从 RX 统计中消失。
+最终保持：
+
+~~~text
+rx = parse_ok + parse_unsupported + parse_malformed
+parse_ok = tx_accepted + tx_unsent
+drop = parse_unsupported + parse_malformed + tx_unsent
+~~~
+
 真实 worker 与 partial-return 集成测试调用同一个函数。测试模拟 4 个 mbuf 中只接受
 2 个，先证明 pool 仍有 2 个 in-use，再模拟 PMD 释放 accepted mbuf，最终 in-use
 必须回到 0。因此不会 free 已转移的 mbuf，也不会泄漏未发送 mbuf。
@@ -146,11 +173,12 @@ hot loop 没有逐包日志、allocation、Go callback 或 lock。
 `dftx<suffix>`，记录创建后的 ifindex，只操作这些接口。它选择当前进程允许的
 一个 CPU，将其映射到 DPDK logical lcore 0，使用 `--no-pci --no-huge` 启动。
 
-验证器通过 AF_PACKET 注入 60-byte deterministic Ethernet frame：EtherType
-`0x88b5`，payload 含 `dpdk-flow-router-goal002`。TX TAP 捕获后会比较完整 frame，
-不是仅检查 link 或统计值。随后发送 SIGTERM，并断言：
+验证器通过 AF_PACKET 先注入一个 IHL=4 的 deterministic malformed IPv4 frame，
+再注入包含 `dpdk-flow-router-goal003` 的合法 66-byte Ethernet/IPv4/UDP frame。
+TX TAP 捕获后比较合法 frame 的全部字节，并拒绝 malformed frame。随后发送
+SIGTERM，并断言：
 
-- `rx == tx_accepted + tx_unsent`，`drop == tx_unsent`；
+- `parse_malformed >= 1`，且三条 parser/TX/drop 统计守恒成立；
 - 两个 port 已 close；
 - pool in-use 为 0 且已 free；
 - EAL cleanup 成功；
@@ -166,9 +194,10 @@ available` 并退回非阻塞 polling；functional forwarding 不受影响。该
 
 ## 8. 软件仿真边界与下一步
 
-当前证据证明 Go/cgo/C ownership、EAL lifecycle、TAP PMD、单 queue RTC 原样
-forwarding 和 cleanup。它不能证明真实 NIC DMA、hardware RSS、cross-NUMA cost、
-descriptor 行为、line-rate、latency 或 throughput。
+当前证据证明 Go/cgo/C ownership、EAL lifecycle、TAP PMD、single-segment
+Ethernet/IPv4/TCP/UDP parsing、parser failure drop、单 queue RTC 原样 forwarding
+和 cleanup。它不能证明真实 NIC DMA、hardware RSS、cross-NUMA cost、descriptor
+行为、line-rate、latency 或 throughput。
 
-Goal 002 验收通过前不开始 Goal 003。parser、flow/route table、rewrite、RCU/QSBR、
-RSS、multi-queue、multi-lcore、API/Web、NAT 与 conntrack 都仍未实现。
+flow/route table、rewrite、RCU/QSBR、RSS、multi-queue、multi-lcore、API/Web、NAT
+与 conntrack 都仍未实现。Goal 003 完成后只等待验收，不开始 Goal 004。

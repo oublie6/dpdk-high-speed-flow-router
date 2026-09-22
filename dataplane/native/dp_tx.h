@@ -4,7 +4,8 @@
 #include <sys/types.h>
 #include <rte_mbuf.h>
 
-/* RX 返回的 n 个 mbuf 归 application；TX 接受 [0,sent) 后归 PMD。
+/* 这里只完成 parser 已接受 packet 的 TX ownership，不再增加 RX counter。
+ * RX 返回的 n 个 mbuf 归 application；TX 接受 [0,sent) 后归 PMD。
  * zero-retry 策略只释放未被接受的尾部，永远不触碰已转移的 ownership。
  * 真实 worker 与 partial-return 测试执行同一个函数，避免测试复制实现。
  */
