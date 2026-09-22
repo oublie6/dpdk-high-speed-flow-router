@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**Goal 002 / Goal 002R 已验收通过。**
+**Goal 002 / Goal 002R 已验收通过，当前进入 Goal 003 Parser 阶段。**
 
 当前已经完成：
 
@@ -386,6 +386,11 @@ Goal 002 / Goal 002R 已正式验收通过：
 5. single-lcore RTC 原样 forwarding；
 6. exact marker 端到端验证。
 
-当前可以开始设计 Goal 003：Ethernet / IPv4 / TCP / UDP parser 与 packet metadata。仍然只做软件仿真，不绑定真实 NIC。
+当前 Goal：
+
+[Goal 003：Ethernet / IPv4 / TCP / UDP Parser 与 Packet Metadata](docs/goals/003-packet-parser-metadata.md)
+
+本阶段只做 parser + metadata：parse 成功仍原样 forwarding，unsupported/malformed packet drop。
+不做 flow/route lookup、rewrite、RSS 或多核。仍然只做软件仿真，不绑定真实 NIC。
 
 开发协作规则见 [AGENTS.md](AGENTS.md)。
