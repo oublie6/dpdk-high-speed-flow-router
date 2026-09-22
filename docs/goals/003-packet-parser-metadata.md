@@ -1,7 +1,7 @@
 # Goal 003：Ethernet / IPv4 / TCP / UDP Parser 与 Packet Metadata
 
 日期：2026-09-23  
-状态：✅ Codex 已完成，待 ChatGPT 验收
+状态：✅ ChatGPT 验收通过
 
 ## 1. 背景与目标
 
@@ -472,3 +472,37 @@ FLOW_ROUTER_TEST_CPU="$EAL_CPU" \
 通过；partial TX ownership、Teardown failure skips Cleanup、C cleanup worker/port/mempool
 guard 全部通过。DPDK 精确为 25.11.3。TAP 结束后无 `flow-router`、`dfrx*` / `dftx*`
 或 `dfr-goal003-*` 残留。当前没有已知未解决问题；下一步只等待 ChatGPT 验收。
+
+
+---
+
+## 21. ChatGPT 验收结论（2026-09-23）
+
+验收 commit：
+
+~~~text
+4c58e566f0104bb7c411a750719047173a026d87
+dataplane: add IPv4 TCP UDP packet parser
+~~~
+
+验收结果：**通过。**
+
+确认：
+
+- parser 仅位于 C/DPDK hot path，没有逐包跨 cgo；
+- metadata 字段保持小而明确，EtherType、IPv4 地址和 TCP/UDP 端口统一为 host byte order；
+- Ethernet、IPv4、TCP、UDP 长度检查顺序正确，IHL 和 TCP data offset 均按报文字段计算；
+- IPv4 fragment、非 IPv4、非 TCP/UDP、multi-segment 明确返回 unsupported；
+- truncated/invalid version/IHL/total length/TCP offset/UDP length 明确返回 malformed；
+- parser 不修改、不释放 mbuf，ownership 仍由 worker 管理；
+- worker 在 RX burst 后立即计 RX，parse failure 立即 free，parse OK 原地 compact 后只做一次 TX burst；
+- dp_complete_tx() 不再增加 RX，只管理 TX accepted/unsent ownership；
+- 三条 stats 守恒关系与 partial TX ownership 保持一致；
+- 20 个 deterministic parser fixture 覆盖 Goal 003 约定的核心 case；
+- Goal003 TAP 正向 IPv4/UDP exact marker 与 malformed drop 均有实际运行证据；
+- Goal 002/002R 的 EAL、partial TX、teardown/cleanup guard 回归证据仍通过；
+- 本 commit 未加入 route/flow lookup、rewrite、RSS/multi-queue 等 Goal 004+ 功能。
+
+当前实现仍只证明 software/TAP 环境下的功能正确性，不代表真实 NIC、hardware RSS、NUMA 或 line-rate 性能。
+
+Goal 003 正式完成，可以进入 Goal 004 的设计阶段。
