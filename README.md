@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**Goal 003 已由 Codex 完成，当前等待 ChatGPT 验收。**
+**Goal 003 已验收通过。**
 
 当前已经完成：
 
@@ -380,7 +380,7 @@ Cloud Native / Cloud Network Dataplane
 
 ## 当前下一步
 
-Goal 002 / Goal 002R 已正式验收通过，Goal 003 已由 Codex 完成并等待验收：
+Goal 002 / Goal 002R / Goal 003 已正式验收通过：
 
 [Goal 002：统一 DPDK 25.11.3、收敛 native C 构建，并跑通 TAP RTC 转发](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md)
 
@@ -397,6 +397,6 @@ Goal 002 / Goal 002R 已正式验收通过，Goal 003 已由 Codex 完成并等�
 
 本阶段实现 parser + metadata：parse 成功仍原样 forwarding，unsupported/malformed
 packet drop。没有实现 flow/route lookup、rewrite、RSS 或多核；仍然只做软件仿真，
-不绑定真实 NIC。下一步只等待 ChatGPT 验收，不开始 Goal 004。
+不绑定真实 NIC。下一步进入 Goal 004 的设计阶段。
 
 开发协作规则见 [AGENTS.md](AGENTS.md)。
