@@ -497,6 +497,12 @@ Goal 002R ✅
 + C cleanup resource guard
 + argv C helper，移除复杂 unsafe pointer arithmetic
 + 构建环境不再依赖 go env -w
+
+Goal 003 ⬜
+Ethernet / IPv4 / TCP / UDP parser
++ packet metadata
++ parser failure drop
++ Goal003 TAP parser 回归
 ~~~
 
 当前仍然只证明 software/simulation dataplane 功能正确性，不绑定真实 NIC，
@@ -504,10 +510,20 @@ Goal 002R ✅
 
 ## 17. 当前执行任务
 
-Goal 002 / Goal 002R 已验收完成。
+当前只执行：
 
-当前没有进行中的实现 Goal。下一步应由 ChatGPT 与用户先设计 Goal 003：
+`docs/goals/003-packet-parser-metadata.md`
 
-> Ethernet / IPv4 / TCP / UDP parser 与 packet metadata。
+Goal 003 只实现：
 
-在 Goal 003 文档和验收标准明确之前，Codex 不应自行继续开发。
+1. Ethernet / IPv4 / TCP / UDP parser；
+2. packet metadata；
+3. single-segment packet parsing；
+4. parse OK 原样转发；
+5. unsupported/malformed packet drop；
+6. parser unit tests 与 TAP 回归。
+
+禁止自行进入 Goal 004+ 的 route/flow lookup、rewrite、动态规则、RCU/QSBR、
+RSS/multi-queue/multi-lcore、API/Web 等内容。
+
+Codex 完成 Goal 003 后必须停止继续开发，等待 ChatGPT 验收。
