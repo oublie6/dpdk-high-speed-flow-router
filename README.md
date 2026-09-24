@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**Goal 003 已验收通过。**
+**Goal 003 已验收通过，当前进入合并 Goal 004-005。**
 
 当前已经完成：
 
@@ -329,9 +329,7 @@ Goal 002  mempool + virtual PMD + RXQ/TXQ + RTC
         ↓
 Goal 003  Ethernet / IPv4 / TCP / UDP parser
         ↓
-Goal 004  route / flow lookup
-        ↓
-Goal 005  DROP / FORWARD / REWRITE
+Goal 004-005  static route / exact-flow lookup + DROP / FORWARD / REWRITE
         ↓
 Goal 006  Go 动态规则管理
         ↓
@@ -380,7 +378,7 @@ Cloud Native / Cloud Network Dataplane
 
 ## 当前下一步
 
-Goal 002 / Goal 002R / Goal 003 已正式验收通过：
+Goal 002 / Goal 002R / Goal 003 已正式验收通过，当前执行合并 Goal 004-005：
 
 [Goal 002：统一 DPDK 25.11.3、收敛 native C 构建，并跑通 TAP RTC 转发](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md)
 
@@ -395,8 +393,10 @@ Goal 002 / Goal 002R / Goal 003 已正式验收通过：
 
 [Goal 003：Ethernet / IPv4 / TCP / UDP Parser 与 Packet Metadata](docs/goals/003-packet-parser-metadata.md)
 
+[Goal 004-005：Static Lookup + DROP / FORWARD / REWRITE](docs/goals/004-005-static-lookup-action-rewrite.md)
+
 本阶段实现 parser + metadata：parse 成功仍原样 forwarding，unsupported/malformed
 packet drop。没有实现 flow/route lookup、rewrite、RSS 或多核；仍然只做软件仿真，
-不绑定真实 NIC。下一步进入 Goal 004 的设计阶段。
+不绑定真实 NIC。当前合并 Goal 004-005 一次完成 static exact-flow/LPM lookup、DROP/FORWARD/REWRITE 与 rewrite checksum；运行期动态热更新留给后续 Goal。
 
 开发协作规则见 [AGENTS.md](AGENTS.md)。
