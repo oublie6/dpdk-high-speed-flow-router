@@ -514,25 +514,36 @@ Go dynamic rule CRUD
 + DPDK QSBR
 + safe old-generation reclaim
 + same-PID runtime reload
+
+Goal 008-009 ⬜
+multi-queue / multi-lcore RTC
++ fixed RXQ/TXQ ownership
++ per-worker stats
++ multi-reader QSBR
++ TAP flow-affinity evidence
++ software benchmark / profiling
 ~~~
 
-当前仍然只证明 software/simulation dataplane 功能与并发回收正确性，不绑定真实 NIC，
-不宣称 hardware RSS、NUMA performance、line-rate 或真实硬件吞吐性能。
+当前仍然只做 software/simulation dataplane；不绑定真实 NIC，
+不宣称 hardware RSS/RETA、cross-NUMA performance、line-rate 或真实硬件吞吐。
 
 ## 17. 当前执行任务
 
-当前没有进行中的实现 Goal。
+当前只执行：
 
-DPDK 项目只剩最后一个合并阶段：
+`docs/goals/008-009-multiqueue-rss-benchmark.md`
 
-~~~text
-Goal 008-009
-multi-queue / RSS / multi-lcore
-+ fixed RXQ -> worker ownership
-+ per-lcore stats
-+ benchmark / profiling
-~~~
+本合并 Goal 是 DPDK Flow Router v0.1 最后一轮，实现：
 
-Goal 008-009 验收通过后，本 DPDK 项目阶段性封板并转入 VPP / GoVPP。
+1. 1/2/4 worker multi-lcore RTC；
+2. fixed RXQ -> worker -> TXQ single ownership；
+3. per-worker packet stats + aggregate conservation；
+4. QSBR 从单 reader 扩展到 multi-reader；
+5. TAP/kernel software flow-affinity 与 multi-flow spread 证据；
+6. multi-worker dynamic rule regression；
+7. 可重复 software TAP benchmark / profiling；
+8. 完整 cleanup / failure regression。
 
-在 Goal 008-009 文档与验收标准明确之前，Codex 不应自行继续开发。
+禁止自行扩展 real NIC/VFIO、hardware RETA、NAT、conntrack、Web/API、VPP 等 scope。
+
+Codex 完成 Goal 008-009 后必须停止，等待 ChatGPT 验收。
