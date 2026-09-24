@@ -495,16 +495,21 @@ DPDK 25.11.3
 Goal 002R ✅
 + Teardown 失败禁止 EAL cleanup
 + C cleanup resource guard
-+ argv C helper，移除复杂 unsafe pointer arithmetic
-+ 构建环境不再依赖 go env -w
++ argv C helper
++ 项目局部构建环境
 
 Goal 003 ✅
 Ethernet / IPv4 / TCP / UDP parser
 + host-order packet metadata
-+ single-segment 明确支持
-+ unsupported/malformed drop
-+ parser unit tests
-+ Goal003 TAP exact marker / malformed drop
++ parser failure drop
++ deterministic parser tests
++ Goal003 TAP 回归
+
+Goal 004-005 ⬜
+static exact-flow + IPv4 LPM lookup
++ DROP / FORWARD / REWRITE
++ 启动前 JSON 规则
++ rewrite checksum
 ~~~
 
 当前仍然只证明 software/simulation dataplane 功能正确性，不绑定真实 NIC，
@@ -512,10 +517,20 @@ Ethernet / IPv4 / TCP / UDP parser
 
 ## 17. 当前执行任务
 
-当前没有进行中的实现 Goal。
+当前只执行：
 
-下一步应由 ChatGPT 与用户先设计 Goal 004：
+`docs/goals/004-005-static-lookup-action-rewrite.md`
 
-> route / exact flow lookup。
+本合并 Goal 一次完成：
 
-在 Goal 004 文档与验收标准明确之前，Codex 不应自行继续开发。
+1. rte_hash exact 5-tuple flow；
+2. rte_lpm IPv4 route fallback；
+3. flow > route lookup precedence；
+4. DROP / FORWARD / REWRITE；
+5. IPv4/TCP/UDP rewrite checksum；
+6. 启动前静态 JSON rule snapshot；
+7. lookup/action lifecycle、stats、unit tests 与 TAP E2E。
+
+严格禁止自行进入后续动态热更新、RCU/QSBR、RSS/multi-queue、benchmark、API/Web。
+
+Codex 完成 Goal 004-005 后必须停止继续开发，等待 ChatGPT 验收。
