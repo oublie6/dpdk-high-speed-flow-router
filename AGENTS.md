@@ -490,7 +490,6 @@ DPDK 25.11.3
 + C-owned mempool
 + 单 RXQ/TXQ
 + single-lcore RTC
-+ exact marker E2E
 
 Goal 002R ✅
 + safe teardown / cleanup guard
@@ -501,16 +500,20 @@ Goal 003 ✅
 Ethernet / IPv4 / TCP / UDP parser
 + host-order metadata
 + parser failure drop
-+ deterministic parser tests
 
 Goal 004-005 ✅
 static rte_hash exact-flow
 + rte_lpm IPv4 route fallback
-+ flow > route > default DROP
 + DROP / FORWARD / REWRITE
-+ IPv4/TCP/UDP checksum
-+ startup JSON rule snapshot
-+ lookup/action lifecycle + E2E
++ checksum
++ startup JSON snapshot
+
+Goal 006-007 ⬜
+dynamic Go rule management
++ immutable native rule snapshots
++ atomic publish
++ DPDK RCU/QSBR
++ safe old-generation reclaim
 ~~~
 
 当前仍然只证明 software/simulation dataplane 功能正确性，不绑定真实 NIC，
@@ -518,14 +521,21 @@ static rte_hash exact-flow
 
 ## 17. 当前执行任务
 
-当前没有进行中的实现 Goal。
+当前只执行：
 
-下一步应先与用户确定收尾压缩方案。优先考虑：
+`docs/goals/006-007-dynamic-rules-qsbr.md`
 
-~~~text
-合并后续 A：动态规则发布 + RCU/QSBR
-合并后续 B：multi-queue / RSS + benchmark
-最后：是否保留 API/Web frontend，或先转 VPP
-~~~
+本合并 Goal 一次完成：
 
-在新的 Goal 文档与验收标准明确之前，Codex 不应自行继续开发。
+1. Go Runtime 动态 Replace/Add/Delete flow/route；
+2. 每次更新重建完整 immutable native snapshot；
+3. atomic pointer publish；
+4. packet worker lock-free read；
+5. DPDK QSBR reader register/online/quiescent/offline/unregister；
+6. grace period 后安全回收旧 hash/LPM/action snapshot；
+7. runtime packet 行为在同一 PID 内随 generation 改变；
+8. dynamic publish / cleanup / failure regression。
+
+禁止自行进入 RSS、multi-queue、multi-lcore、benchmark、REST/gRPC/Web。
+
+Codex 完成 Goal 006-007 后必须停止，等待 ChatGPT 验收。
