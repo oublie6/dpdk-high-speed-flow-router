@@ -1,7 +1,7 @@
 # Goal 006-007：Dynamic Rule Publication + RCU/QSBR
 
 日期：2026-09-25  
-状态：✅ Codex 已完成，待 ChatGPT 验收
+状态：✅ ChatGPT 验收通过
 
 ## 1. 目标
 
@@ -576,3 +576,48 @@ gcc -std=c11 -Wall -Wextra -Werror $(pkg-config --cflags libdpdk) \
 guard、20 个 parser fixture、malformed drop、exact hash、LPM longest-prefix、flow precedence、
 DROP/FORWARD/REWRITE、TCP/UDP checksum 与 packet stats 守恒。当前没有进入 RSS、
 multi-queue、multi-lcore、per-lcore stats 或 benchmark，也没有已知的本 Goal 未解决问题。
+
+
+---
+
+## 21. ChatGPT 验收结论（2026-09-25）
+
+验收 commit：
+
+~~~text
+5813b906814215b31fbbc17ed587dacab5767d79
+dataplane: add dynamic rules with QSBR
+~~~
+
+验收结果：**通过。**
+
+确认：
+
+- native 规则资源已收敛为 generation-owned immutable snapshot，flow hash、LPM、action store 生命周期不再拆分；
+- active snapshot 使用 C11 atomic pointer，reader acquire-load，writer acq_rel exchange；
+- dynamic publish 先完整 build 新 generation，再 atomic exchange，之后才启动 QSBR grace period；
+- worker 每个 RX burst 只读取一次 snapshot，整个 burst 使用同一 generation；
+- non-empty burst 在 lookup/action/TX ownership 完成后报告 quiescent；
+- RX=0 idle 分支同样报告 quiescent，不会让低流量 dataplane 阻塞 writer；
+- reader register/online/quiescent/offline/unregister 生命周期完整；
+- QSBR capacity 按 RTE_MAX_LCORE 预留，当前 reader ID=0，为下一 Goal 多 worker 留有明确扩展点；
+- native deterministic test 真实证明：新 pointer 已可见时 publisher 仍被旧 reader 阻塞，reader quiescent 后旧 generation 才 reclaim；
+- dynamic builder 使用 EAL 初始化阶段保存的 socket_id，不依赖普通 Go publish goroutine 的当前 socket；
+- generation-specific rte_hash/rte_lpm object name 避免新旧 generation 共存时名称冲突；
+- build failure 释放 partial new snapshot，不改变 active pointer、generation 或旧 packet behavior；
+- Go Runtime 已提供 ReplaceRules、Add/Delete Flow、Add/Delete Route，并由 mutex 串行化 writer；
+- Go-owned current snapshot 只在 native publish 成功后提交，失败时保持旧 snapshot；
+- caller-owned slice 会被复制，不会反向修改已发布 generation；
+- native 边界再次通过 writer mutex 串行化 publish，生命周期 API threading contract 已更新；
+- SIGHUP reload 在同一 PID/EAL/port/mempool 中完成 generation 1 -> 2 -> 3；
+- 同一个 packet 的行为真实完成 DROP -> REWRITE -> route FORWARD，rewrite checksum 有验证；
+- invalid JSON reload 不触发 native publish，旧 generation 和 packet behavior 保持；
+- native stress 连续 publish 50 次后 generation/reclaim 计数闭合，没有已知 snapshot/hash/LPM/action 泄漏；
+- teardown 在 worker offline/unregister 后 detach current snapshot、释放 QSBR，并有 snapshot_freed / qsbr_freed 证据；
+- cleanup guard 已覆盖 active snapshot、QSBR、writer active；
+- Goal002/002R/003/004-005 的 lifecycle、parser、lookup、action、checksum、partial TX 和 stats regression 均有执行记录；
+- 本 commit 未进入 RSS、multi-queue、multi-lcore、per-lcore stats 或 benchmark scope。
+
+当前实现仍然只证明 software/TAP 环境下的功能与并发回收正确性，不代表真实 NIC、hardware RSS、NUMA 或 line-rate 性能。
+
+Goal 006-007 正式完成。下一阶段只剩 Goal 008-009：multi-queue / RSS / multi-lcore + benchmark/profiling。
