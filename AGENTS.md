@@ -489,27 +489,28 @@ DPDK 25.11.3
 + 双 TAP Virtual PMD
 + C-owned mempool
 + 单 RXQ/TXQ
-+ single-lcore RTC 原样转发
-+ exact marker 端到端验证
++ single-lcore RTC
++ exact marker E2E
 
 Goal 002R ✅
-+ Teardown 失败禁止 EAL cleanup
-+ C cleanup resource guard
++ safe teardown / cleanup guard
 + argv C helper
-+ 项目局部构建环境
++ project-local build env
 
 Goal 003 ✅
 Ethernet / IPv4 / TCP / UDP parser
-+ host-order packet metadata
++ host-order metadata
 + parser failure drop
 + deterministic parser tests
-+ Goal003 TAP 回归
 
-Goal 004-005 ⬜
-static exact-flow + IPv4 LPM lookup
+Goal 004-005 ✅
+static rte_hash exact-flow
++ rte_lpm IPv4 route fallback
++ flow > route > default DROP
 + DROP / FORWARD / REWRITE
-+ 启动前 JSON 规则
-+ rewrite checksum
++ IPv4/TCP/UDP checksum
++ startup JSON rule snapshot
++ lookup/action lifecycle + E2E
 ~~~
 
 当前仍然只证明 software/simulation dataplane 功能正确性，不绑定真实 NIC，
@@ -517,20 +518,14 @@ static exact-flow + IPv4 LPM lookup
 
 ## 17. 当前执行任务
 
-当前只执行：
+当前没有进行中的实现 Goal。
 
-`docs/goals/004-005-static-lookup-action-rewrite.md`
+下一步应先与用户确定收尾压缩方案。优先考虑：
 
-本合并 Goal 一次完成：
+~~~text
+合并后续 A：动态规则发布 + RCU/QSBR
+合并后续 B：multi-queue / RSS + benchmark
+最后：是否保留 API/Web frontend，或先转 VPP
+~~~
 
-1. rte_hash exact 5-tuple flow；
-2. rte_lpm IPv4 route fallback；
-3. flow > route lookup precedence；
-4. DROP / FORWARD / REWRITE；
-5. IPv4/TCP/UDP rewrite checksum；
-6. 启动前静态 JSON rule snapshot；
-7. lookup/action lifecycle、stats、unit tests 与 TAP E2E。
-
-严格禁止自行进入后续动态热更新、RCU/QSBR、RSS/multi-queue、benchmark、API/Web。
-
-Codex 完成 Goal 004-005 后必须停止继续开发，等待 ChatGPT 验收。
+在新的 Goal 文档与验收标准明确之前，Codex 不应自行继续开发。
