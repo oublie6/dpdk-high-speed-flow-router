@@ -25,6 +25,22 @@ type Info struct {
 	RXPort, TXPort, RXDesc, TXDesc uint16
 	NBMbuf, CacheSize              uint
 	SocketID                       int
+	Workers                        []WorkerInfo
+}
+type WorkerInfo struct {
+	WorkerID, LcoreID    uint
+	RXQueueID, TXQueueID uint16
+}
+type PacketStats struct {
+	RX, ParseOK, ParseUnsupported, ParseMalformed uint64
+	FlowHit, RouteHit, LookupMiss                 uint64
+	ActionDrop, ActionForward, ActionRewrite      uint64
+	TXAccepted, TXUnsent, Drop                    uint64
+	RXBursts, RXEmptyPolls, TXBursts              uint64
+}
+type WorkerStats struct {
+	Info    WorkerInfo
+	Packets PacketStats
 }
 type Stats struct {
 	RX                         uint64
@@ -35,6 +51,9 @@ type Stats struct {
 	ActionDrop, ActionForward  uint64
 	ActionRewrite              uint64
 	TXAccepted, TXUnsent, Drop uint64
+	RXBursts, RXEmptyPolls     uint64
+	TXBursts                   uint64
+	Workers                    []WorkerStats
 	RulesGeneration            uint64
 	RulesPublishSuccess        uint64
 	RulesPublishFailed         uint64
@@ -128,11 +147,19 @@ func GetInfo() (Info, error) {
 	if err := status("EAL info", C.dp_runtime_get_info(&info)); err != nil {
 		return Info{}, err
 	}
-	return Info{Initialized: info.initialized != 0, MainLcore: uint(info.main_lcore),
+	result := Info{Initialized: info.initialized != 0, MainLcore: uint(info.main_lcore),
 		LcoreCount: uint(info.lcore_count), Version: C.GoString(info.version),
 		RXPort: uint16(info.rx_port), TXPort: uint16(info.tx_port),
 		RXDesc: uint16(info.rx_desc), TXDesc: uint16(info.tx_desc),
-		NBMbuf: uint(info.nb_mbuf), CacheSize: uint(info.cache_size), SocketID: int(info.socket_id)}, nil
+		NBMbuf: uint(info.nb_mbuf), CacheSize: uint(info.cache_size), SocketID: int(info.socket_id)}
+	for i := 0; i < int(info.worker_count); i++ {
+		worker := info.workers[i]
+		result.Workers = append(result.Workers, WorkerInfo{
+			WorkerID: uint(worker.worker_id), LcoreID: uint(worker.lcore_id),
+			RXQueueID: uint16(worker.rx_queue_id), TXQueueID: uint16(worker.tx_queue_id),
+		})
+	}
+	return result, nil
 }
 
 type ruleArrays struct {
@@ -212,12 +239,12 @@ func PublishRules(snapshot RuleSnapshot) (uint64, error) {
 	return uint64(generation), err
 }
 
-func Setup(rxDevice, txDevice string) error {
+func Setup(rxDevice, txDevice string, workerCount uint) error {
 	rx, tx := C.CString(rxDevice), C.CString(txDevice)
 	defer C.free(unsafe.Pointer(rx))
 	defer C.free(unsafe.Pointer(tx))
 	// setup 只同步查找设备名，不保留这两个临时字符串。
-	return status("dataplane setup", C.dp_dataplane_setup(rx, tx))
+	return status("dataplane setup", C.dp_dataplane_setup(rx, tx, C.uint(workerCount)))
 }
 func Run() error      { return status("dataplane run", C.dp_dataplane_run()) }
 func RequestStop()    { C.dp_dataplane_request_stop() }
@@ -227,20 +254,37 @@ func GetStats() (Stats, error) {
 	if err := status("dataplane stats", C.dp_dataplane_get_stats(&s)); err != nil {
 		return Stats{}, err
 	}
-	return Stats{RX: uint64(s.rx), ParseOK: uint64(s.parse_ok),
+	result := Stats{RX: uint64(s.rx), ParseOK: uint64(s.parse_ok),
 		ParseUnsupported: uint64(s.parse_unsupported), ParseMalformed: uint64(s.parse_malformed),
 		FlowHit: uint64(s.flow_hit), RouteHit: uint64(s.route_hit),
 		LookupMiss: uint64(s.lookup_miss), ActionDrop: uint64(s.action_drop),
 		ActionForward: uint64(s.action_forward), ActionRewrite: uint64(s.action_rewrite),
-		TXAccepted: uint64(s.tx_accepted), TXUnsent: uint64(s.tx_unsent),
-		Drop: uint64(s.drop), RulesGeneration: uint64(s.rules_generation),
+		TXAccepted: uint64(s.tx_accepted), TXUnsent: uint64(s.tx_unsent), Drop: uint64(s.drop),
+		RXBursts: uint64(s.rx_bursts), RXEmptyPolls: uint64(s.rx_empty_polls),
+		TXBursts: uint64(s.tx_bursts), RulesGeneration: uint64(s.rules_generation),
 		RulesPublishSuccess: uint64(s.rules_publish_success),
 		RulesPublishFailed:  uint64(s.rules_publish_failed),
 		RulesReclaimed:      uint64(s.rules_reclaimed),
 		PortsClosed:         uint(s.ports_closed), PoolInUse: uint(s.pool_in_use),
 		PoolFreed: s.pool_freed != 0, FlowTableFreed: s.flow_table_freed != 0,
 		RouteTableFreed: s.route_table_freed != 0, ActionStoreFreed: s.action_store_freed != 0,
-		SnapshotFreed: s.snapshot_freed != 0, QSBRFreed: s.qsbr_freed != 0}, nil
+		SnapshotFreed: s.snapshot_freed != 0, QSBRFreed: s.qsbr_freed != 0}
+	for i := 0; i < int(s.worker_count); i++ {
+		worker := s.workers[i]
+		p := worker.packets
+		result.Workers = append(result.Workers, WorkerStats{
+			Info: WorkerInfo{WorkerID: uint(worker.info.worker_id), LcoreID: uint(worker.info.lcore_id),
+				RXQueueID: uint16(worker.info.rx_queue_id), TXQueueID: uint16(worker.info.tx_queue_id)},
+			Packets: PacketStats{RX: uint64(p.rx), ParseOK: uint64(p.parse_ok),
+				ParseUnsupported: uint64(p.parse_unsupported), ParseMalformed: uint64(p.parse_malformed),
+				FlowHit: uint64(p.flow_hit), RouteHit: uint64(p.route_hit), LookupMiss: uint64(p.lookup_miss),
+				ActionDrop: uint64(p.action_drop), ActionForward: uint64(p.action_forward),
+				ActionRewrite: uint64(p.action_rewrite), TXAccepted: uint64(p.tx_accepted),
+				TXUnsent: uint64(p.tx_unsent), Drop: uint64(p.drop), RXBursts: uint64(p.rx_bursts),
+				RXEmptyPolls: uint64(p.rx_empty_polls), TXBursts: uint64(p.tx_bursts)},
+		})
+	}
+	return result, nil
 }
 func Cleanup() error {
 	err := status("EAL cleanup", C.dp_runtime_cleanup())
@@ -266,6 +310,7 @@ const (
 	testLiveActiveRules = 4
 	testLiveQSBR        = 5
 	testLiveWriter      = 6
+	testLiveReader      = 7
 )
 
 // testCleanupGuard 直接返回 cleanup 的 errno，供 package 测试断言防御边界。
@@ -275,6 +320,32 @@ func testCleanupGuard(resource int) error {
 
 func testDynamicRulesQSBR() error {
 	return status("dynamic rules/QSBR test", C.dp_test_dynamic_rules_qsbr())
+}
+
+func testWorkerStatsLayout() error {
+	return status("worker stats/layout test", C.dp_test_worker_stats_layout())
+}
+
+func testInjectRemoteLaunchFailure(workerID int) {
+	C.dp_test_inject_remote_launch_failure(C.int(workerID))
+}
+
+func testInjectWorkerFailure(workerID int) {
+	C.dp_test_inject_worker_failure(C.int(workerID))
+}
+
+func testInjectQueueSetupFailure(queueID int) {
+	C.dp_test_inject_queue_setup_failure(C.int(queueID))
+}
+
+func testQueueCapacity(maxRX, maxTX, workers uint) error {
+	return status("queue capacity test", C.dp_test_queue_capacity(
+		C.uint(maxRX), C.uint(maxTX), C.uint(workers)))
+}
+
+func testWorkerSocket(baseline, worker int) error {
+	return status("worker socket test", C.dp_test_worker_socket(
+		C.int(baseline), C.int(worker)))
 }
 
 type testPacketMeta struct {

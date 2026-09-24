@@ -1,4 +1,4 @@
-# 架构说明：Dynamic Rule Snapshot 与 DPDK QSBR
+# 架构说明：Multi-Queue RTC、Dynamic Snapshot 与 QSBR
 
 ## 1. 当前实现
 
@@ -13,17 +13,16 @@ dataplane/native         thin cgo、C writer mutex、snapshot builder
         |
         +-> atomic active_rules exchange -> DPDK QSBR -> reclaim old generation
         |
-DPDK EAL -> TAP RXQ0 -> fixed owner lcore
+DPDK EAL -> TAP RXQi -> fixed worker i / lcore i
          -> burst 级 acquire-load snapshot
          -> Ethernet/IPv4/TCP/UDP parse
-         -> exact flow -> IPv4 LPM fallback -> action -> TAP TXQ0
-         -> quiescent
+         -> exact flow -> IPv4 LPM fallback -> action -> TAP TXQi
+         -> QSBR reader i quiescent
 ~~~
 
 packet hot path 仍全部位于 C。Go 不逐包跨 cgo；worker 不使用 mutex、refcount、逐包
-allocation或逐包日志。当前只有一个 RXQ、一个 worker reader 和一个 TXQ，但 QSBR
-reader capacity 按 `RTE_MAX_LCORE` 分配，reader ID 与注册点已经显式化，后续可以增加
-reader，而无需改变 snapshot ownership 模型。
+allocation 或逐包日志。当前支持 1/2/4 workers，每个 RXQ/TXQ 只有一个 owner；所有
+workers 共享 immutable rule snapshot 和一个 C-owned mempool，不跨 core 传 packet。
 
 ## 2. 从静态全局资源到整代 snapshot
 
@@ -85,20 +84,20 @@ atomic exchange 一旦成功，新代已经对 reader 可见；正常 grace-peri
 
 ## 4. QSBR read side
 
-当前 worker 使用 reader ID 0，生命周期为：
+每个 worker 使用 `reader_id = worker_id = queue_id`，生命周期为：
 
 ~~~text
 Run
--> rte_rcu_qsbr_thread_register(0)
--> rte_rcu_qsbr_thread_online(0)
+-> rte_rcu_qsbr_thread_register(i)
+-> rte_rcu_qsbr_thread_online(i)
 -> loop
    -> rte_eth_rx_burst()
    -> atomic_load_explicit(active_rules, memory_order_acquire) 一次
    -> 整个 burst 使用同一个 snapshot
    -> parse / lookup / action / TX ownership 完成
-   -> rte_rcu_qsbr_quiescent(0)
--> rte_rcu_qsbr_thread_offline(0)
--> rte_rcu_qsbr_thread_unregister(0)
+   -> rte_rcu_qsbr_quiescent(i)
+-> rte_rcu_qsbr_thread_offline(i)
+-> rte_rcu_qsbr_thread_unregister(i)
 ~~~
 
 `rte_eth_rx_burst()` 返回 0 时仍然立即报告 quiescent。否则 idle dataplane 的 writer
@@ -200,18 +199,62 @@ TAP verifier 使用同一个 PID、EAL、两个 port 和 mempool 验证同一个
 日志必须只有一次 EAL init 和一次 port setup；最终要求 generation=3、publish_success=3、
 reclaimed=2，并继续验证 malformed、lookup miss、packet stats 守恒和完整 cleanup。
 
-native 确定性测试让 reader online 后启动异步 publisher。测试先观察到 generation 2
-active pointer，同时确认 publisher 尚未返回且旧代未回收；reader quiescent 后 writer
-才完成并令 reclaimed 增加。测试再让一个只报告 RX=0 quiescent 的 idle reader 推进
+native 确定性测试让两个 readers online 后启动异步 publisher。测试先观察到 generation 2
+active pointer，同时确认 publisher 尚未返回且旧代未回收；reader0 单独 quiescent 仍不
+允许回收，reader1 quiescent 后 writer 才完成并令 reclaimed 增加。测试再让两个只报告
+RX=0 quiescent 的 idle readers 推进
 同步 publish，随后验证非法 build 保留旧 generation，并在 reader offline 状态连续
 publish 50 次；最终 generation 53、旧代累计回收 52 次，current snapshot 与 QSBR
 在 teardown 释放。
 
-## 10. 软件仿真边界与下一步
+## 10. Multi-Queue worker 与 stats
+
+Go CLI 的 `--workers` 支持 1～4，并要求 EAL enabled lcore 数完全一致。main lcore 执行
+worker0，其余 workers 由 `rte_eal_remote_launch()` 启动。Setup 保存并打印每个
+`worker_id/lcore_id/rx_queue_id/tx_queue_id`，同时验证两个 TAP port 的 queue capability
+和所有 selected lcores 位于初始化 mempool 的同一 NUMA socket。当前单 NUMA software
+baseline 遇到跨 NUMA mapping 直接拒绝，不实现 per-NUMA mempool。
+
+每个 worker 保持 RTC：
+
+~~~text
+RX burst on RXQi
+-> acquire-load active snapshot once
+-> parse / exact flow / LPM / action / rewrite
+-> bounded TX on TXQi
+-> reader i quiescent
+~~~
+
+worker context 按 `RTE_CACHE_LINE_SIZE` 对齐，结构大小也是完整 cache-line 倍数。hot path
+只写当前 worker 的 `dp_packet_stats`；规则 publish/reclaim counters 仍由 writer control
+path 写。所有 workers stop/join 后，`GetStats` 才逐项聚合 worker-local counters，因此
+没有共享 packet counter 的 atomic increment，也没有 concurrent stats snapshot 的数据竞争。
+
+remote launch 中途失败时设置全局 stop 并 join 已启动 workers；任一 worker 返回错误也
+设置 stop，main worker 和其余 remote workers 退出后统一 join。Teardown 与 EAL cleanup
+同时检查 active worker、launched worker、registered reader，不能在任何 lcore 仍引用
+DPDK resource 时继续。
+
+## 11. Multi-reader QSBR 与软件 affinity
+
+native deterministic test 同时 online reader0 和 reader1。publish 交换 pointer 后，
+reader0 单独 quiescent 时 writer 仍被 reader1 阻塞且旧代未回收；reader1 quiescent 后
+grace period 才完成。两个 idle reader 也持续报告 quiescent，之后继续覆盖 build rollback、
+50 次 publish 与 teardown。
+
+TAP functional verifier 的真实结果：同一 5-tuple 的 32 packets 全部命中一个 worker且
+payload sequence 保序；32 flows 在 2/4 workers 均产生 multi-worker distribution。该证据
+只说明 Linux TAP/kernel software flow-based multi-queue distribution，不等价于 hardware
+RSS、RETA 或真实 NIC line-rate。显式 TAP `rte_flow RSS` 因当前 lab 缺少 clang 而跳过。
+
+## 12. 软件 benchmark 与封板边界
 
 当前证据覆盖 Go/cgo/C ownership、运行期 whole-snapshot replacement、C11 atomic、真实
-DPDK QSBR、TAP PMD、parser、lookup/action/checksum、single queue RTC 和 cleanup。
-它不能证明真实 NIC DMA、hardware RSS、cross-NUMA cost、line-rate、latency 或 throughput。
+multi-reader DPDK QSBR、TAP multi-queue、1/2/4-lcore RTC、per-worker stats、parser、
+lookup/action/checksum、software flow affinity 与可重复 software benchmark。
 
-RSS、multi-queue、multi-lcore、per-lcore stats 与 benchmark 仍未实现，留给 Goal 008-009。
-REST/gRPC/Web、NAT、conntrack、ARP 和 IPv6 不属于本 Goal。
+`scripts/run_benchmark.sh` 默认执行 18 case；正式最低矩阵执行 1/2/4 workers × 64/1500B
+× 1/1024 flows 共 12 case。方法见 `docs/benchmark.md`，真实结果保存在 `results/`。
+这些结果不能证明真实 NIC DMA、hardware RSS/RETA、cross-NUMA cost、line-rate 或 PCIe
+throughput。DPDK Flow Router v0.1 在 Goal 008-009 后阶段性封板；REST/gRPC/Web、NAT、
+conntrack、ARP、IPv6、VPP 和硬件扩展都不在本 Goal。

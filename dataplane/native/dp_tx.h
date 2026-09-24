@@ -10,5 +10,5 @@
  * 真实 worker 与 partial-return 测试执行同一个函数，避免测试复制实现。
  */
 void dp_complete_tx(struct rte_mbuf **pkts, uint16_t n, uint16_t sent,
-                    struct dp_stats *stats);
+                    struct dp_packet_stats *stats);
 #endif

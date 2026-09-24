@@ -13,7 +13,6 @@
 #include <rte_lcore.h>
 #include <rte_malloc.h>
 
-#define DP_RULE_READER_ID 0U
 #define DP_RULE_READER_CAPACITY RTE_MAX_LCORE
 
 _Static_assert(sizeof(struct dp_flow_key) == 16,
@@ -121,7 +120,11 @@ dp_snapshot_build(const struct dp_flow_rule *flows, uint32_t flow_count,
         snprintf(flow_name, sizeof(flow_name), "dfr_f_%llu",
                  (unsigned long long)generation);
         hash_parameters.name = flow_name;
-        hash_parameters.entries = DP_MAX_FLOW_RULES;
+        /* rte_hash 的 entries 包含 bucket/extendable-bucket 容量，并不保证在
+         * 极端 key 分布下恰好装满同数目的 keys。为 1024 条公开规则预留
+         * 2 倍 table 容量，避免合法满额 snapshot 因 bucket occupancy ENOSPC。
+         */
+        hash_parameters.entries = DP_MAX_FLOW_RULES * 2;
         hash_parameters.key_len = sizeof(struct dp_flow_key);
         hash_parameters.hash_func = rte_jhash;
         hash_parameters.socket_id = dp.info.socket_id;
@@ -323,30 +326,34 @@ dp_rules_active_load(void)
 }
 
 int
-dp_rules_reader_register(void)
+dp_rules_reader_register(unsigned int reader_id)
 {
     int ret;
 
-    if (!dp.rules_qsbr)
+    if (!dp.rules_qsbr || reader_id >= DP_RULE_READER_CAPACITY)
         return -ENODEV;
-    ret = rte_rcu_qsbr_thread_register(dp.rules_qsbr, DP_RULE_READER_ID);
+    ret = rte_rcu_qsbr_thread_register(dp.rules_qsbr, reader_id);
     if (ret != 0)
         return -(rte_errno ? rte_errno : EIO);
-    rte_rcu_qsbr_thread_online(dp.rules_qsbr, DP_RULE_READER_ID);
+    rte_rcu_qsbr_thread_online(dp.rules_qsbr, reader_id);
+    atomic_fetch_add_explicit(&dp.registered_readers, 1,
+                              memory_order_relaxed);
     return 0;
 }
 
 void
-dp_rules_reader_quiescent(void)
+dp_rules_reader_quiescent(unsigned int reader_id)
 {
-    rte_rcu_qsbr_quiescent(dp.rules_qsbr, DP_RULE_READER_ID);
+    rte_rcu_qsbr_quiescent(dp.rules_qsbr, reader_id);
 }
 
 void
-dp_rules_reader_unregister(void)
+dp_rules_reader_unregister(unsigned int reader_id)
 {
-    rte_rcu_qsbr_thread_offline(dp.rules_qsbr, DP_RULE_READER_ID);
-    (void)rte_rcu_qsbr_thread_unregister(dp.rules_qsbr, DP_RULE_READER_ID);
+    rte_rcu_qsbr_thread_offline(dp.rules_qsbr, reader_id);
+    (void)rte_rcu_qsbr_thread_unregister(dp.rules_qsbr, reader_id);
+    atomic_fetch_sub_explicit(&dp.registered_readers, 1,
+                              memory_order_relaxed);
 }
 
 enum dp_lookup_result

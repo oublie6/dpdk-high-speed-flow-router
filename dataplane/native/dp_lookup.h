@@ -38,9 +38,9 @@ dp_lookup_packet(const struct dp_packet_meta *meta,
                  const struct dp_rule_snapshot *snapshot,
                  const struct dp_rule_action **action);
 struct dp_rule_snapshot *dp_rules_active_load(void);
-int dp_rules_reader_register(void);
-void dp_rules_reader_quiescent(void);
-void dp_rules_reader_unregister(void);
+int dp_rules_reader_register(unsigned int reader_id);
+void dp_rules_reader_quiescent(unsigned int reader_id);
+void dp_rules_reader_unregister(unsigned int reader_id);
 void dp_rules_teardown(void);
 
 #endif

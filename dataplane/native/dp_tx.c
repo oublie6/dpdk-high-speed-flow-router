@@ -8,7 +8,7 @@
 
 void
 dp_complete_tx(struct rte_mbuf **pkts, uint16_t n, uint16_t sent,
-               struct dp_stats *stats)
+               struct dp_packet_stats *stats)
 {
     stats->tx_accepted += sent;
     stats->tx_unsent += n - sent;
@@ -22,7 +22,7 @@ dp_test_tx_partial_ownership(void)
 {
     struct rte_mempool *pool;
     struct rte_mbuf *pkts[4];
-    struct dp_stats stats = {
+    struct dp_packet_stats stats = {
         .rx = 4,
         .parse_ok = 4,
         .flow_hit = 4,

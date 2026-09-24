@@ -16,6 +16,7 @@ type Stats = native.Stats
 type Config struct {
 	EALArgs            []string
 	RXDevice, TXDevice string
+	Workers            uint
 	Probe              bool
 	Rules              RuleSnapshot
 }
@@ -39,6 +40,9 @@ type Runtime struct {
 }
 
 func validate(cfg Config) error {
+	if cfg.Workers < 1 || cfg.Workers > 4 {
+		return fmt.Errorf("workers must be between 1 and 4")
+	}
 	noPCI := false
 	for _, arg := range cfg.EALArgs {
 		if strings.IndexByte(arg, 0) >= 0 {
@@ -65,6 +69,9 @@ func validate(cfg Config) error {
 
 // Start 立即返回 handle；Ready 等待初始化结果，Stop 可在初始化期间请求，Wait 等待清理。
 func Start(cfg Config) (*Runtime, error) {
+	if cfg.Workers == 0 {
+		cfg.Workers = 1
+	}
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
@@ -131,15 +138,16 @@ func (r *Runtime) owner(cfg Config) {
 	initialized := err == nil
 	if err == nil {
 		r.info, err = native.GetInfo()
-		if err == nil && r.info.LcoreCount != 1 {
-			err = fmt.Errorf("exactly one EAL lcore is required")
+		if err == nil && r.info.LcoreCount != cfg.Workers {
+			err = fmt.Errorf("EAL enabled lcore count %d does not match workers %d",
+				r.info.LcoreCount, cfg.Workers)
 		}
 	}
 	if err == nil && !cfg.Probe {
 		err = native.ConfigureRules(toNativeRules(cfg.Rules))
 	}
 	if err == nil && !cfg.Probe {
-		err = native.Setup(cfg.RXDevice, cfg.TXDevice)
+		err = native.Setup(cfg.RXDevice, cfg.TXDevice, cfg.Workers)
 		if err == nil {
 			r.info, err = native.GetInfo()
 		}
@@ -174,7 +182,7 @@ func (r *Runtime) Wait() (Stats, error)  { <-r.done; return r.stats, r.err }
 
 // Probe 保留 Goal 001 的同步 EAL 回归入口，使用同一个 owner/lifecycle 实现。
 func Probe(args []string) (Info, error) {
-	r, err := Start(Config{EALArgs: args, Probe: true})
+	r, err := Start(Config{EALArgs: args, Workers: 1, Probe: true})
 	if err != nil {
 		return Info{}, err
 	}

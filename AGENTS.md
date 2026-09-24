@@ -515,7 +515,7 @@ Go dynamic rule CRUD
 + safe old-generation reclaim
 + same-PID runtime reload
 
-Goal 008-009 ⬜
+Goal 008-009 ✅ Codex 已完成，待 ChatGPT 验收
 multi-queue / multi-lcore RTC
 + fixed RXQ/TXQ ownership
 + per-worker stats
@@ -527,13 +527,13 @@ multi-queue / multi-lcore RTC
 当前仍然只做 software/simulation dataplane；不绑定真实 NIC，
 不宣称 hardware RSS/RETA、cross-NUMA performance、line-rate 或真实硬件吞吐。
 
-## 17. 当前执行任务
+## 17. 当前封板状态
 
-当前只执行：
+已完成：
 
 `docs/goals/008-009-multiqueue-rss-benchmark.md`
 
-本合并 Goal 是 DPDK Flow Router v0.1 最后一轮，实现：
+本合并 Goal 是 DPDK Flow Router v0.1 最后一轮，已经实现：
 
 1. 1/2/4 worker multi-lcore RTC；
 2. fixed RXQ -> worker -> TXQ single ownership；
@@ -546,4 +546,4 @@ multi-queue / multi-lcore RTC
 
 禁止自行扩展 real NIC/VFIO、hardware RETA、NAT、conntrack、Web/API、VPP 等 scope。
 
-Codex 完成 Goal 008-009 后必须停止，等待 ChatGPT 验收。
+DPDK Flow Router v0.1 现阶段已封板。等待 ChatGPT 验收；不得自行继续扩展 DPDK 项目。

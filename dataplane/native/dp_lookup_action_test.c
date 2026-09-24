@@ -233,7 +233,7 @@ static int
 test_packet_actions(struct rte_mempool *pool)
 {
     struct rte_mbuf *candidates[4];
-    struct dp_stats stats = {0};
+    struct dp_packet_stats stats = {0};
     struct rte_mbuf *mbuf;
     uint8_t before[128];
     uint16_t before_len;
@@ -424,6 +424,7 @@ struct test_publish_context {
 
 struct test_idle_reader_context {
     atomic_bool stop;
+    unsigned int reader_id;
 };
 
 static void *
@@ -445,7 +446,7 @@ test_idle_reader_thread(void *argument)
 
     /* 模拟 worker 的 RX=0 分支：没有 packet 可处理时仍持续报告 quiescent。 */
     while (!atomic_load_explicit(&context->stop, memory_order_acquire)) {
-        dp_rules_reader_quiescent();
+        dp_rules_reader_quiescent(context->reader_id);
         rte_pause();
     }
     return NULL;
@@ -472,11 +473,14 @@ dp_test_dynamic_rules_qsbr(void)
         .l4_proto = IPPROTO_UDP,
     };
     struct test_publish_context context = {.done = ATOMIC_VAR_INIT(false)};
-    struct test_idle_reader_context idle = {.stop = ATOMIC_VAR_INIT(false)};
+    struct test_idle_reader_context idle[2] = {
+        {.stop = ATOMIC_VAR_INIT(false), .reader_id = 0},
+        {.stop = ATOMIC_VAR_INIT(false), .reader_id = 1},
+    };
     const struct dp_rule_action *found;
     struct dp_rule_snapshot *active;
     pthread_t writer;
-    pthread_t idle_reader;
+    pthread_t idle_readers[2];
     uint64_t generation;
     uint64_t reclaimed_before;
     int ret = 0;
@@ -502,15 +506,21 @@ dp_test_dynamic_rules_qsbr(void)
     }
 
     dp.ready = true;
-    ret = dp_rules_reader_register();
+    ret = dp_rules_reader_register(0);
     if (ret < 0)
         goto out;
+    ret = dp_rules_reader_register(1);
+    if (ret < 0) {
+        dp_rules_reader_unregister(0);
+        goto out;
+    }
     context.flows = &updated;
     context.flow_count = 1;
     reclaimed_before = dp.stats.rules_reclaimed;
     if (pthread_create(&writer, NULL, test_publish_thread, &context) != 0) {
         ret = -EIO;
-        dp_rules_reader_unregister();
+        dp_rules_reader_unregister(1);
+        dp_rules_reader_unregister(0);
         goto out;
     }
 
@@ -529,7 +539,16 @@ dp_test_dynamic_rules_qsbr(void)
         atomic_load_explicit(&context.done, memory_order_acquire)) {
         ret = -EIO;
     }
-    dp_rules_reader_quiescent();
+    /* reader0 单独 quiescent 后，reader1 仍持有旧 generation；writer 必须
+     * 继续阻塞，不能把“任意 reader 已推进”误当成完整 grace period。
+     */
+    dp_rules_reader_quiescent(0);
+    for (uint32_t spin = 0; spin < 1000000; spin++)
+        rte_pause();
+    if (dp.stats.rules_reclaimed != reclaimed_before ||
+        atomic_load_explicit(&context.done, memory_order_acquire))
+        ret = -EIO;
+    dp_rules_reader_quiescent(1);
     if (pthread_join(writer, NULL) != 0)
         ret = -EIO;
     if (ret == 0 && (context.result != 0 || context.generation != 2 ||
@@ -540,19 +559,31 @@ dp_test_dynamic_rules_qsbr(void)
 
     /* reader 保持 online，但只执行 RX=0 quiescent；同步 publish 必须能够完成。 */
     updated.action = forward;
-    if (pthread_create(&idle_reader, NULL, test_idle_reader_thread, &idle) != 0) {
+    if (pthread_create(&idle_readers[0], NULL, test_idle_reader_thread,
+                       &idle[0]) != 0) {
+        ret = -EIO;
+        goto out_reader;
+    }
+    if (pthread_create(&idle_readers[1], NULL, test_idle_reader_thread,
+                       &idle[1]) != 0) {
+        atomic_store_explicit(&idle[0].stop, true, memory_order_release);
+        (void)pthread_join(idle_readers[0], NULL);
         ret = -EIO;
         goto out_reader;
     }
     ret = dp_publish_rules(&updated, 1, NULL, 0, &generation);
-    atomic_store_explicit(&idle.stop, true, memory_order_release);
-    if (pthread_join(idle_reader, NULL) != 0)
-        ret = -EIO;
+    for (unsigned int i = 0; i < 2; i++)
+        atomic_store_explicit(&idle[i].stop, true, memory_order_release);
+    for (unsigned int i = 0; i < 2; i++) {
+        if (pthread_join(idle_readers[i], NULL) != 0)
+            ret = -EIO;
+    }
     if (ret == 0 && (generation != 3 || dp.stats.rules_reclaimed != 2))
         ret = -EIO;
 
 out_reader:
-    dp_rules_reader_unregister();
+    dp_rules_reader_unregister(1);
+    dp_rules_reader_unregister(0);
     if (ret < 0)
         goto out;
 

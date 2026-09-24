@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**Goal 006-007 已验收通过，当前进入最终 Goal 008-009：multi-queue / RSS-affinity / multi-lcore + benchmark。**
+**DPDK Flow Router v0.1 已完成 Goal 008-009 实现，等待 ChatGPT 最终验收。**
 
 当前已经完成：
 
@@ -41,11 +41,15 @@
 - `SIGHUP` 运行期 JSON reload，失败时保留旧 generation 和 packet behavior；
 - 同一 PID 内 generation 1 DROP -> generation 2 REWRITE -> generation 3 route FORWARD；
 - 50 次连续 publish、build rollback、idle reader 与 snapshot/QSBR cleanup 回归。
+- 1/2/4 worker multi-queue RTC，固定 `RXQi -> workeri/lcorei -> TXQi` ownership；
+- main lcore worker0 + DPDK remote workers 的 stop/join/error lifecycle；
+- cache-line 对齐的 per-worker packet stats，以及 stop 后无竞争 aggregate；
+- `reader_id = worker_id` 的 multi-reader QSBR 与 2-reader 回收边界测试；
+- TAP/kernel same-flow affinity、32-flow multi-worker spread 与双 worker dynamic reload；
+- 可重复 software TAP/kernel/raw-socket benchmark harness 与正式 12-case 结果。
 
-尚未实现：
-
-- Goal 008-009：multi-queue / multi-lcore、TAP flow-affinity、per-worker stats、benchmark；
-- Web API / frontend（v0.1 暂缓，不再作为封板前要求）。
+v0.1 未覆盖且没有声称验证：physical NIC DMA、hardware RSS/RETA、cross-NUMA
+performance、line-rate，以及 Web API/frontend、NAT、conntrack、ARP、IPv6。
 
 详细边界见 [架构与 ownership](docs/architecture.md)，实现与验收证据见
 [Goal 002](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md) 和
@@ -511,16 +515,16 @@ Go CRUD
 
 Web/API 暂缓，避免偏离高性能数据面主线。
 
-下一阶段只剩 Goal 008-009：RSS / multi-queue / multi-lcore + benchmark/profiling。
+Goal 008-009 已完成 Codex 实现与自测，等待 ChatGPT 最终验收。
 
 
 ## 最终 Goal 008-009
 
-当前执行：
+实现与验收记录：
 
 [Goal 008-009：Multi-Queue / RSS / Multi-Lcore + Benchmark](docs/goals/008-009-multiqueue-rss-benchmark.md)
 
-目标：
+当前实现：
 
 ~~~text
 RX port
@@ -532,7 +536,7 @@ RX port
 
 每个 worker 保持 RTC，并独占自己的 RXQ/TXQ；packet stats 改为 per-worker，QSBR reader id 与 worker id 对齐。
 
-当前 TAP/software 环境只要求验证：
+TAP/software 环境已验证：
 
 ~~~text
 same 5-tuple -> stable worker affinity
@@ -541,6 +545,27 @@ many flows -> spread across multiple workers
 
 这属于 Linux TAP/kernel software flow-based distribution 证据，不等价于真实 NIC hardware RSS/RETA。显式 TAP rte_flow RSS 若环境支持可额外验证，不作为硬性依赖。
 
-本 Goal 同时交付可重复 software benchmark，至少覆盖 1/2/4 workers、64/1500B、1/1024 flows，并记录 offered load、RX/TX/drop、Mpps/Gbps、CPU 与 worker distribution。
+运行 2-worker 数据面示例：
 
-Goal 008-009 验收通过后，DPDK Flow Router v0.1 阶段性封板，下一步转入 VPP / GoVPP。
+~~~bash
+./bin/flow-router --workers 2 --rules-file ./rules.json -- \
+  --lcores="0@${CPU0},1@${CPU1}" --no-huge --no-pci --no-shconf \
+  --no-telemetry -m 256 \
+  --vdev=net_tap_rx,iface=dfrx0 --vdev=net_tap_tx,iface=dftx0
+~~~
+
+功能与正式最低 benchmark：
+
+~~~bash
+./scripts/verify_multiqueue.sh
+./scripts/run_benchmark.sh --minimum
+~~~
+
+benchmark 覆盖 1/2/4 workers、64/1500B、1/1024 flows，并记录 offered load、
+RX/TX/drop、Mpps/Gbps、CPU 与 worker distribution。详细方法见
+[benchmark 文档](docs/benchmark.md)，真实结果见
+[Markdown](results/goal008009-software-benchmark.md) 和
+[CSV](results/goal008009-software-benchmark.csv)。
+
+Goal 008-009 等待 ChatGPT 验收；验收后 DPDK Flow Router v0.1 阶段性封板，下一步转入
+VPP / GoVPP。本仓库不继续扩展 Goal 范围。

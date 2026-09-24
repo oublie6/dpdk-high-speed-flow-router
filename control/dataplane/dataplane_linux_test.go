@@ -92,6 +92,15 @@ func TestRejectNUL(t *testing.T) {
 	}
 }
 
+func TestWorkerCountValidation(t *testing.T) {
+	for _, workers := range []uint{5, 100} {
+		err := validate(Config{EALArgs: []string{"--no-pci"}, Workers: workers})
+		if err == nil || !strings.Contains(err.Error(), "workers must be between 1 and 4") {
+			t.Fatalf("workers=%d validation error = %v", workers, err)
+		}
+	}
+}
+
 // Setup 失败发生在静态规则已经发布之后，必须仍由 Teardown 释放 hash/action，
 // 然后才允许 EAL cleanup。独立子进程隔离一次性 EAL lifecycle。
 func TestSetupFailureFreesStaticRules(t *testing.T) {

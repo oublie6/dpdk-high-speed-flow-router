@@ -2,6 +2,15 @@
 #define DP_API_H
 #include <stdint.h>
 
+#define DP_MAX_WORKERS 4
+
+struct dp_worker_info {
+    unsigned int worker_id;
+    unsigned int lcore_id;
+    uint16_t rx_queue_id;
+    uint16_t tx_queue_id;
+};
+
 /* 公共边界不暴露 mbuf/ethdev。Info 中 version 是借用指针，Go 在 cleanup 前复制。 */
 struct dp_runtime_info {
     int initialized;
@@ -10,12 +19,34 @@ struct dp_runtime_info {
     uint16_t rx_port, tx_port, rx_desc, tx_desc;
     unsigned int nb_mbuf, cache_size;
     int socket_id;
+    unsigned int worker_count;
+    struct dp_worker_info workers[DP_MAX_WORKERS];
 };
+
+/* packet counters 由各 worker 独占写入。dp_stats 顶层字段只在 worker 全部
+ * join 后聚合，避免 hot path 上的共享写和 atomic increment。
+ */
+struct dp_packet_stats {
+    uint64_t rx, parse_ok, parse_unsupported, parse_malformed;
+    uint64_t flow_hit, route_hit, lookup_miss;
+    uint64_t action_drop, action_forward, action_rewrite;
+    uint64_t tx_accepted, tx_unsent, drop;
+    uint64_t rx_bursts, rx_empty_polls, tx_bursts;
+};
+
+struct dp_worker_stats {
+    struct dp_worker_info info;
+    struct dp_packet_stats packets;
+};
+
 struct dp_stats {
     uint64_t rx, parse_ok, parse_unsupported, parse_malformed;
     uint64_t flow_hit, route_hit, lookup_miss;
     uint64_t action_drop, action_forward, action_rewrite;
     uint64_t tx_accepted, tx_unsent, drop;
+    uint64_t rx_bursts, rx_empty_polls, tx_bursts;
+    unsigned int worker_count;
+    struct dp_worker_stats workers[DP_MAX_WORKERS];
     uint64_t rules_generation, rules_publish_success;
     uint64_t rules_publish_failed, rules_reclaimed;
     unsigned int ports_closed, pool_in_use;
@@ -80,7 +111,8 @@ int dp_configure_rules(const struct dp_flow_rule *flows, uint32_t flow_count,
 int dp_publish_rules(const struct dp_flow_rule *flows, uint32_t flow_count,
                      const struct dp_route_rule *routes, uint32_t route_count,
                      uint64_t *generation);
-int dp_dataplane_setup(const char *rx_device, const char *tx_device);
+int dp_dataplane_setup(const char *rx_device, const char *tx_device,
+                       unsigned int worker_count);
 int dp_dataplane_run(void);
 /* stop 也允许其他线程调用：只写 C-owned atomic flag，不操作任何 queue。 */
 void dp_dataplane_request_stop(void);

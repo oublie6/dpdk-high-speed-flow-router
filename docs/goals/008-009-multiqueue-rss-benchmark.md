@@ -1,7 +1,7 @@
 # Goal 008-009：Multi-Queue / RSS / Multi-Lcore + Benchmark
 
 日期：2026-09-25  
-状态：⬜ 待 Codex 实现
+状态：✅ Codex 已完成，待 ChatGPT 验收
 
 ## 1. 背景与目标
 
@@ -824,3 +824,163 @@ cleanup evidence
 all previous Goal regressions
 remaining hardware limitations
 ~~~
+
+---
+
+## 27. Codex 实现记录（2026-09-24）
+
+### 27.1 Worker、queue 与 lifecycle
+
+CLI 新增 `--workers`，支持 1/2/4，要求 EAL enabled lcore 数与 worker 数相等。Setup
+显式建立并打印：
+
+~~~text
+queue_id == worker_id == QSBR reader_id
+worker0 -> EAL main lcore
+worker1..N-1 -> rte_eal_remote_launch
+~~~
+
+两个 TAP ports 都按 worker 数配置对称 RX/TX queues，并检查 `max_rx_queues`、
+`max_tx_queues`。每个 selected lcore 通过 `rte_lcore_to_socket_id()` 检查与初始化
+socket 相同；本 software baseline 不实现 cross-NUMA/per-NUMA mempool。
+
+worker i 只 poll RXQi、只发送 TXQi，保持完整 RTC，不使用 `rte_ring` 或 packet
+cross-core handoff。remote launch 中途失败会 stop 并 join 已启动 workers；任一 worker
+错误会触发全局 stop。Run 只有在全部 remote lcores join 后才返回。真实故障注入分别覆盖
+remote launch failure 和 remote worker failure，之后 snapshot/QSBR/ports/pool/EAL 均能
+安全清理。
+
+### 27.2 Per-worker stats 与 false sharing
+
+packet counters 已从 `dp_state.stats` hot-path global writes 移到每个 `dp_worker_ctx` 内的
+`dp_packet_stats`。context 使用 `__rte_cache_aligned`，并用两个 `_Static_assert` 保证
+alignment 和结构大小都是 cache-line 边界。每个 worker 只写自己的 counters；rule
+generation/publish/reclaim 仍是 control writer counters。
+
+worker 全部 stop/join 后，`GetStats` 才逐项 aggregate，并返回固定 mapping 与 worker
+明细。deterministic test 给两个 worker 填入覆盖全部 packet/burst fields 的不同值，验证
+逐项 aggregate、cache-line non-overlap 与五条 packet conservation。
+
+### 27.3 Multi-reader QSBR
+
+reader API 改为显式接收 `reader_id`；真实 worker 使用 worker ID。RX=0 与非空 burst 都在
+不再引用 snapshot 后报告各自 quiescent。
+
+native 真实 DPDK test 同时 online reader0/reader1。generation 2 pointer exchange 可见后：
+
+~~~text
+reader0 quiescent
+-> publisher 仍未返回
+-> rules_reclaimed 不变
+
+reader1 quiescent
+-> grace period 完成
+-> generation 1 reclaimed
+~~~
+
+两个 idle readers 也能共同推进同步 publish。build rollback、offline/unregister、50 次
+连续 publish、generation=53/reclaimed=52 与 final snapshot/QSBR free 回归继续通过。
+
+### 27.4 TAP affinity、spread 与动态规则
+
+`scripts/verify_multiqueue.sh` 真实运行结果：
+
+~~~text
+single-flow affinity distribution: [0, 32]
+32-flow / 2-worker distribution: [36, 28]
+32-flow / 4-worker distribution: [16, 20, 18, 10]
+PASS
+~~~
+
+single-flow 的 32 个 sequence payload 保持顺序，且 exact `flow_hit` 只出现在一个 worker。
+32 flows 在 2/4 worker case 都形成 multi-worker distribution。脚本同时断言每个 mapping
+为 `RXQi -> workeri -> TXQi`，aggregate flow hits 与 deterministic packets 相等。
+
+随后在 2 workers online 条件下，同一个 PID/EAL/ports/queues/mempool 完成 generation 1
+DROP -> generation 2 REWRITE + IPv4/UDP checksum -> invalid reload 保持旧代 -> generation 3
+route FORWARD。最终 generation=3、publish_success=3、reclaimed=2，两个 worker 都有真实
+RX/poll 活动，packet conservation 与完整 teardown 通过。
+
+这是 Linux TAP/kernel software flow-based distribution evidence。optional explicit TAP
+`rte_flow RSS` 因 lab 没有 clang、未启用 optional eBPF/toolchain path 而 skipped；没有写成
+PASS，也不声称 hardware RSS/RETA。
+
+### 27.5 正式 software benchmark
+
+benchmark source commit：
+
+~~~text
+f4b28ab26dfb34034922c63ae5240521b22fc5aa
+worktree_dirty=false
+~~~
+
+环境：DPDK 25.11.3、kernel 5.4.0-216-generic、Intel Xeon E5-2698 v4、8 个 allowed
+CPUs、单 NUMA node 0、net_tap software PMD。正式执行：
+
+~~~bash
+./scripts/run_benchmark.sh --minimum
+~~~
+
+12 cases 全部使用 1s warmup + 5s measurement；统计的连续区间为 6s。矩阵完整覆盖
+1/2/4 workers × 64/1500B × 1/1024 flows。TX 吞吐范围：
+
+~~~text
+1 worker: 0.060003 - 0.081845 Mpps
+2 workers: 0.066255 - 0.091159 Mpps
+4 workers: 0.082581 - 0.097918 Mpps
+~~~
+
+最高记录为 4 workers、1500B、1 flow：0.097918 Mpps / 1.175022 Gbps。该数字包含
+同机 Python raw-socket generator/capture、kernel 和 TAP；多个 case 的 offered > router
+visible RX，另一些 case 接近 generator offered ceiling。结果只说明 generator/TAP/kernel
+组合路径与相对趋势，没有宣称 router-limited scaling 或 line-rate。原始逐 case counters、
+CPU utilization、lcore map 和 worker distribution 见 `results/goal008009-software-benchmark.csv`，
+摘要见同名 Markdown。
+
+### 27.6 Cleanup 与回归
+
+功能脚本、benchmark 每个 case 结束均检查：所有 workers stopped/joined、所有 readers
+offline/unregistered、current snapshot/QSBR freed、ports_closed=2、pool_in_use=0、pool
+freed、EAL cleanup succeeded。正式矩阵后再次检查，没有 flow-router process、测试 TAP、
+temp directory 或 Python cache 残留。
+
+实际通过的门禁与回归包括：
+
+~~~bash
+git diff --check
+make build
+make test
+make vet
+FLOW_ROUTER_TEST_CPU=0 make test
+
+bash -n scripts/install_dpdk.sh
+bash -n scripts/check_env.sh
+bash -n scripts/verify_tap_forwarding.sh
+bash -n scripts/verify_multiqueue.sh
+bash -n scripts/run_benchmark.sh
+python3 -m py_compile scripts/verify_tap_forwarding.py
+python3 -m py_compile scripts/verify_multiqueue.py
+python3 -m py_compile scripts/run_benchmark.py
+
+./scripts/check_env.sh
+./scripts/verify_tap_forwarding.sh
+./scripts/verify_multiqueue.sh
+./scripts/run_benchmark.sh --minimum
+
+gcc -std=c11 -Wall -Wextra -Werror $(pkg-config --cflags libdpdk) \
+  -Idataplane/native -fsyntax-only \
+  dataplane/native/dp_lookup.c dataplane/native/dp_worker.c \
+  dataplane/native/dp_runtime.c dataplane/native/dp_port.c \
+  dataplane/native/dp_lookup_action_test.c dataplane/native/dp_tx.c
+~~~
+
+回归覆盖 EAL lifecycle、Teardown failure、cleanup guards（含 live worker/reader）、partial
+TX ownership、20 parser fixtures、rte_hash/rte_lpm、flow precedence、DROP/FORWARD/REWRITE、
+TCP/UDP checksum、Go CRUD、atomic publication、2-reader QSBR、idle readers、build rollback、
+50+ publish stress、SIGHUP reload、worker mapping/stats/failure paths。1024-flow benchmark 还
+发现原 hash table 的内部 entries 不足以保证装满公开上限；内部容量增至 2048，公开规则
+上限仍为 1024，并由正式 1024-flow cases 真实覆盖。
+
+本 Goal 没有实现或声称证明 real NIC/VFIO、hardware RETA、cross-NUMA optimization、
+per-NUMA mempool、NAT、conntrack、ARP、IPv6、Web/API、VPP、RDMA 或 SmartNIC。DPDK Flow
+Router v0.1 已阶段性封板，等待 ChatGPT 验收。

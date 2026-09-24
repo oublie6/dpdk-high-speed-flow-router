@@ -2,10 +2,14 @@ package native
 
 import (
 	"errors"
+	"fmt"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"reflect"
 	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -96,6 +100,7 @@ func TestRuntimeCleanupRejectsLiveResources(t *testing.T) {
 		{name: "active rule snapshot", resource: testLiveActiveRules},
 		{name: "QSBR", resource: testLiveQSBR},
 		{name: "writer", resource: testLiveWriter},
+		{name: "reader", resource: testLiveReader},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -103,6 +108,184 @@ func TestRuntimeCleanupRejectsLiveResources(t *testing.T) {
 			if !errors.Is(err, syscall.EBUSY) {
 				t.Fatalf("cleanup guard returned %v, want EBUSY", err)
 			}
+		})
+	}
+}
+
+func TestWorkerStatsAggregationAndLayout(t *testing.T) {
+	if err := testWorkerStatsLayout(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkerSetupValidation(t *testing.T) {
+	if err := testQueueCapacity(1, 4, 2); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("RX queue capacity error = %v, want ENOSPC", err)
+	}
+	if err := testQueueCapacity(4, 1, 2); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("TX queue capacity error = %v, want ENOSPC", err)
+	}
+	if err := testQueueCapacity(4, 4, 4); err != nil {
+		t.Fatalf("valid queue capacity rejected: %v", err)
+	}
+	if err := testWorkerSocket(0, 1); !errors.Is(err, syscall.EXDEV) {
+		t.Fatalf("cross-NUMA worker error = %v, want EXDEV", err)
+	}
+	if err := testWorkerSocket(0, 0); err != nil {
+		t.Fatalf("same-NUMA worker rejected: %v", err)
+	}
+}
+
+func allowedCPUs(t *testing.T) []int {
+	t.Helper()
+	data, err := ioutil.ReadFile("/proc/self/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "Cpus_allowed_list:") {
+			continue
+		}
+		var cpus []int
+		for _, part := range strings.Split(strings.TrimSpace(strings.TrimPrefix(line, "Cpus_allowed_list:")), ",") {
+			bounds := strings.Split(part, "-")
+			first, parseErr := strconv.Atoi(bounds[0])
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			last := first
+			if len(bounds) == 2 {
+				last, parseErr = strconv.Atoi(bounds[1])
+				if parseErr != nil {
+					t.Fatal(parseErr)
+				}
+			}
+			for cpu := first; cpu <= last; cpu++ {
+				cpus = append(cpus, cpu)
+			}
+		}
+		return cpus
+	}
+	t.Fatal("Cpus_allowed_list not found")
+	return nil
+}
+
+// 在真实 2-lcore EAL/TAP 上覆盖 lcore mismatch、partial queue setup、remote
+// launch failure 和 worker error。Run 必须 stop/join 已启动 lcore，随后才能
+// 安全释放 readers、snapshot、QSBR、ports、pool 与 EAL。
+func TestMultiWorkerFailureCleanup(t *testing.T) {
+	if os.Getenv("FLOW_ROUTER_TEST_CPU") == "" {
+		t.Skip("set FLOW_ROUTER_TEST_CPU to run real multi-worker failure tests")
+	}
+	if mode := os.Getenv("FLOW_ROUTER_MULTI_FAILURE_CHILD"); mode != "" {
+		cpus := allowedCPUs(t)
+		if len(cpus) < 2 {
+			t.Skip("at least two allowed CPUs are required")
+		}
+		runtime.LockOSThread()
+		rxIface := fmt.Sprintf("nrx%d", os.Getpid())
+		txIface := fmt.Sprintf("ntx%d", os.Getpid())
+		args := []string{fmt.Sprintf("--lcores=0@%d,1@%d", cpus[0], cpus[1]),
+			"--no-huge", "--no-pci", "--no-shconf", "--no-telemetry", "-m", "256",
+			"--vdev=net_tap_rx,iface=" + rxIface,
+			"--vdev=net_tap_tx,iface=" + txIface}
+		if err := Init(args); err != nil {
+			t.Fatal(err)
+		}
+		if err := ConfigureRules(RuleSnapshot{}); err != nil {
+			t.Fatal(err)
+		}
+		if mode == "mismatch" {
+			if err := Setup("net_tap_rx", "net_tap_tx", 1); !errors.Is(err, syscall.EINVAL) {
+				t.Fatalf("lcore/worker mismatch error = %v, want EINVAL", err)
+			}
+			if err := Teardown(); err != nil {
+				t.Fatal(err)
+			}
+			if err := Cleanup(); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{rxIface, txIface} {
+				if _, err := os.Stat("/sys/class/net/" + name); !os.IsNotExist(err) {
+					t.Fatalf("TAP remains after partial queue cleanup: %s", name)
+				}
+			}
+			return
+		}
+		if mode == "queue" {
+			testInjectQueueSetupFailure(1)
+			if err := Setup("net_tap_rx", "net_tap_tx", 2); !errors.Is(err, syscall.EIO) {
+				t.Fatalf("partial queue setup error = %v, want EIO", err)
+			}
+			if err := Teardown(); err != nil {
+				t.Fatal(err)
+			}
+			stats, err := GetStats()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stats.PortsClosed != 2 || stats.PoolInUse != 0 || !stats.PoolFreed ||
+				!stats.SnapshotFreed || !stats.QSBRFreed {
+				t.Fatalf("partial queue cleanup incomplete: %+v", stats)
+			}
+			if err := Cleanup(); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{rxIface, txIface} {
+				if _, err := os.Stat("/sys/class/net/" + name); !os.IsNotExist(err) {
+					t.Fatalf("TAP remains after partial queue cleanup: %s", name)
+				}
+			}
+			return
+		}
+		if err := Setup("net_tap_rx", "net_tap_tx", 2); err != nil {
+			t.Fatal(err)
+		}
+		info, err := GetInfo()
+		if err != nil || len(info.Workers) != 2 ||
+			info.Workers[0].WorkerID != 0 || info.Workers[0].RXQueueID != 0 ||
+			info.Workers[0].TXQueueID != 0 || info.Workers[1].WorkerID != 1 ||
+			info.Workers[1].RXQueueID != 1 || info.Workers[1].TXQueueID != 1 {
+			t.Fatalf("invalid single-owner mapping: info=%+v err=%v", info, err)
+		}
+		if mode == "launch" {
+			testInjectRemoteLaunchFailure(1)
+		} else {
+			testInjectWorkerFailure(1)
+		}
+		if err := Run(); !errors.Is(err, syscall.EIO) {
+			t.Fatalf("Run error = %v, want EIO", err)
+		}
+		if err := Teardown(); err != nil {
+			t.Fatal(err)
+		}
+		stats, err := GetStats()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stats.PortsClosed != 2 || stats.PoolInUse != 0 || !stats.PoolFreed ||
+			!stats.SnapshotFreed || !stats.QSBRFreed {
+			t.Fatalf("incomplete failure cleanup: %+v", stats)
+		}
+		if err := Cleanup(); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{rxIface, txIface} {
+			if _, err := os.Stat("/sys/class/net/" + name); !os.IsNotExist(err) {
+				t.Fatalf("TAP remains after cleanup: %s", name)
+			}
+		}
+		return
+	}
+	for _, mode := range []string{"mismatch", "queue", "launch", "worker"} {
+		t.Run(mode, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestMultiWorkerFailureCleanup$", "-test.v")
+			cmd.Env = append(os.Environ(), "FLOW_ROUTER_MULTI_FAILURE_CHILD="+mode)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			t.Logf("%s", out)
 		})
 	}
 }
@@ -202,8 +385,8 @@ func TestDynamicRulesQSBR(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	t.Logf("%s", out)
-	t.Log("reader lifecycle PASS; publish visibility PASS; pre-quiescent retain PASS; " +
-		"post-quiescent reclaim PASS; idle reader publish PASS; build rollback PASS; " +
+	t.Log("2-reader lifecycle PASS; reader0-only retain PASS; reader1 reclaim PASS; " +
+		"publish visibility PASS; two idle readers publish PASS; build rollback PASS; " +
 		"50 publishes leak-free PASS; " +
 		"snapshot/QSBR teardown PASS")
 }

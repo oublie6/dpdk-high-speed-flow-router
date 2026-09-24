@@ -127,6 +127,8 @@ def main():
     parser.add_argument("--timeout", type=float, default=30, help="主体测试的整体超时秒数")
     parser.add_argument("--skip-injection", action="store_true", help="负向验收：不注入，验证超时与清理")
     parser.add_argument("--bad-device", action="store_true", help="负向验收：setup 失败仍须清理 EAL/TAP")
+    parser.add_argument("--workers", type=int, choices=(1, 2, 4), default=1,
+                        help="使用 1/2/4 个 RTC workers；动态规则回归使用 2")
     args = parser.parse_args()
     if not 0 < args.timeout <= 120:
         parser.error("timeout 必须在 (0,120] 秒内")
@@ -140,7 +142,10 @@ def main():
     for name in interfaces:
         if (Path("/sys/class/net") / name).exists():
             raise RuntimeError("随机接口名已存在，拒绝复用: " + name)
-    cpu = min(os.sched_getaffinity(0))
+    cpus = sorted(os.sched_getaffinity(0))[:args.workers]
+    if len(cpus) != args.workers:
+        raise RuntimeError("可用 CPU 数不足以启动 %d workers" % args.workers)
+    lcore_map = ",".join("%d@%d" % pair for pair in enumerate(cpus))
     deadline = time.monotonic() + args.timeout
     owned = {}
     process = None
@@ -179,8 +184,9 @@ def main():
         with log_path.open("w+") as log:
             try:
                 command = [str(binary), "--rules-file", str(rules_path),
+                           "--workers", str(args.workers),
                            "--rx-device", "missing_tap" if args.bad_device else "net_tap_rx",
-                           "--tx-device", "net_tap_tx", "--", "--lcores=0@" + str(cpu),
+                           "--tx-device", "net_tap_tx", "--", "--lcores=" + lcore_map,
                            "--no-huge", "--no-pci", "--no-shconf", "--no-telemetry", "-m", "256",
                            "--vdev=net_tap_rx,iface=" + rx_iface,
                            "--vdev=net_tap_tx,iface=" + tx_iface]

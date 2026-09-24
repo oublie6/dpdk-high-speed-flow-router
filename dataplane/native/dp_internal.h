@@ -8,6 +8,7 @@
 #include <rte_mempool.h>
 #include <rte_rcu_qsbr.h>
 #include "dp_lookup.h"
+#include "dp_worker.h"
 
 #define DP_NB_MBUF 4096
 #define DP_CACHE_SIZE 128
@@ -22,10 +23,15 @@ struct dp_state {
     struct rte_rcu_qsbr *rules_qsbr;
     pthread_mutex_t writer_lock;
     atomic_bool writer_active;
+    atomic_uint active_workers;
+    atomic_uint registered_readers;
     uint16_t ports[2];
     bool owned[2], started[2];
+    unsigned int worker_count;
+    struct dp_worker_ctx workers[DP_MAX_WORKERS];
     struct dp_runtime_info info;
     struct dp_stats stats;
 };
 extern struct dp_state dp;
+bool dp_workers_stopped(void);
 #endif
