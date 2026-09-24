@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**合并 Goal 004-005 已验收通过。**
+**合并 Goal 004-005 已验收通过，当前进入 Goal 006-007：动态规则 + QSBR。**
 
 当前已经完成：
 
@@ -442,3 +442,35 @@ Goal 002 / Goal 002R / Goal 003 / 合并 Goal 004-005 已正式验收通过：
 与启动前 JSON snapshot。运行期 Add/Delete/Replace/reload、RCU/QSBR、RSS、多 queue 和多 lcore 仍未实现。下一步进入后续收尾阶段设计。
 
 开发协作规则见 [AGENTS.md](AGENTS.md)。
+
+
+## 当前收尾路线
+
+为了尽快完成 DPDK 项目并转入 VPP，剩余路线压缩为：
+
+~~~text
+Goal 006-007  Dynamic Rules + RCU/QSBR
+        ↓
+Goal 008-009  Multi-queue / RSS + Benchmark
+        ↓
+DPDK 项目阶段性封板
+        ↓
+VPP / GoVPP
+~~~
+
+当前执行：
+
+[Goal 006-007：Dynamic Rule Publication + RCU/QSBR](docs/goals/006-007-dynamic-rules-qsbr.md)
+
+本阶段采用 whole-snapshot replacement，而不是运行期原地修改 rte_hash/rte_lpm：
+
+~~~text
+Go CRUD
+-> build immutable snapshot
+-> atomic publish
+-> worker lock-free read
+-> QSBR grace period
+-> reclaim old generation
+~~~
+
+Web/API 暂缓，避免偏离高性能数据面主线。
