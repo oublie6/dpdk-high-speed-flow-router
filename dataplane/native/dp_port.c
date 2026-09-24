@@ -74,7 +74,6 @@ int dp_dataplane_setup(const char *rx_device, const char *tx_device)
     dp.info.tx_port = dp.ports[1];
     dp.info.nb_mbuf = DP_NB_MBUF;
     dp.info.cache_size = DP_CACHE_SIZE;
-    dp.info.socket_id = rte_socket_id();
     /* 单 owner、单向转发只需要一个 pool；无需跨核传递或多个 pool。 */
     dp.pool = rte_pktmbuf_pool_create("flow_router_pool", DP_NB_MBUF,
         DP_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, dp.info.socket_id);

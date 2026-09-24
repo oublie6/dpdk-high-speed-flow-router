@@ -1,9 +1,14 @@
 package dataplane
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/oublie6/dpdk-high-speed-flow-router/dataplane/native"
 )
@@ -36,6 +41,140 @@ func TestParseRulesValidSnapshot(t *testing.T) {
 	}
 	if snapshot.Routes[0].Prefix != 0x0a010200 || snapshot.Routes[0].Depth != 24 {
 		t.Fatalf("route was not masked to its network: %+v", snapshot.Routes[0])
+	}
+}
+
+func newRuleTestRuntime(initial RuleSnapshot) *Runtime {
+	ready := make(chan struct{})
+	close(ready)
+	generation := uint64(1)
+	return &Runtime{
+		ready: ready, currentRules: cloneRules(initial), generation: generation,
+		rulesOpen: true,
+		publishRules: func(native.RuleSnapshot) (uint64, error) {
+			generation++
+			return generation, nil
+		},
+	}
+}
+
+func testFlow(port uint16) FlowRule {
+	return FlowRule{SrcIPv4: 0xc0000201, DstIPv4: 0xc6336402,
+		SrcPort: 12345, DstPort: port, L4Proto: 17,
+		Action: RuleAction{Type: native.ActionDrop}}
+}
+
+func testRoute(prefix uint32, depth uint8) RouteRule {
+	return RouteRule{Prefix: prefix, Depth: depth,
+		Action: RuleAction{Type: native.ActionForward}}
+}
+
+func TestRuntimeReplaceRulesAndOwnership(t *testing.T) {
+	initial := RuleSnapshot{Flows: []FlowRule{testFlow(1000)}}
+	runtime := newRuleTestRuntime(initial)
+	replacement := RuleSnapshot{Flows: []FlowRule{testFlow(2000)},
+		Routes: []RouteRule{testRoute(0x0a000000, 8)}}
+	if err := runtime.ReplaceRules(replacement); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.RulesGeneration() != 2 ||
+		!reflect.DeepEqual(runtime.currentRules, replacement) {
+		t.Fatalf("valid replace was not committed: %+v", runtime.currentRules)
+	}
+	// Runtime 必须拥有深拷贝；caller 后续改 slice 不能改变当前 generation。
+	replacement.Flows[0].DstPort = 9999
+	replacement.Routes = nil
+	if runtime.currentRules.Flows[0].DstPort != 2000 ||
+		len(runtime.currentRules.Routes) != 1 {
+		t.Fatal("caller mutation changed Runtime-owned snapshot")
+	}
+
+	before := cloneRules(runtime.currentRules)
+	invalid := RuleSnapshot{Flows: []FlowRule{{L4Proto: 1,
+		Action: RuleAction{Type: native.ActionDrop}}}}
+	if err := runtime.ReplaceRules(invalid); err == nil {
+		t.Fatal("invalid replace was accepted")
+	}
+	if !reflect.DeepEqual(runtime.currentRules, before) ||
+		runtime.RulesGeneration() != 2 {
+		t.Fatal("invalid replace changed current snapshot or generation")
+	}
+
+	runtime.publishRules = func(native.RuleSnapshot) (uint64, error) {
+		return 0, errors.New("injected native publish failure")
+	}
+	if err := runtime.ReplaceRules(initial); err == nil {
+		t.Fatal("native publish failure was not returned")
+	}
+	if !reflect.DeepEqual(runtime.currentRules, before) ||
+		runtime.RulesGeneration() != 2 {
+		t.Fatal("native publish failure changed Go snapshot")
+	}
+}
+
+func TestRuntimeFlowAndRouteCRUD(t *testing.T) {
+	flow := testFlow(2000)
+	route := testRoute(0x0a010200, 24)
+	runtime := newRuleTestRuntime(RuleSnapshot{})
+	if err := runtime.AddFlow(flow); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.AddFlow(flow); err == nil {
+		t.Fatal("duplicate flow Add was accepted")
+	}
+	if err := runtime.DeleteFlow(flowRuleKey(flow)); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.DeleteFlow(flowRuleKey(flow)); err == nil {
+		t.Fatal("missing flow Delete was accepted")
+	}
+	if err := runtime.AddRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.AddRoute(route); err == nil {
+		t.Fatal("duplicate route Add was accepted")
+	}
+	if err := runtime.DeleteRoute(routeRuleKey(route)); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.DeleteRoute(routeRuleKey(route)); err == nil {
+		t.Fatal("missing route Delete was accepted")
+	}
+}
+
+func TestRuntimeConcurrentWritersAreSerialized(t *testing.T) {
+	runtime := newRuleTestRuntime(RuleSnapshot{})
+	var inFlight int32
+	var concurrent int32
+	var generation uint64 = 1
+	runtime.publishRules = func(native.RuleSnapshot) (uint64, error) {
+		if atomic.AddInt32(&inFlight, 1) != 1 {
+			atomic.StoreInt32(&concurrent, 1)
+		}
+		time.Sleep(5 * time.Millisecond)
+		atomic.AddInt32(&inFlight, -1)
+		return atomic.AddUint64(&generation, 1), nil
+	}
+	var group sync.WaitGroup
+	errorsFound := make(chan error, 2)
+	for _, port := range []uint16{2001, 2002} {
+		group.Add(1)
+		go func(flow FlowRule) {
+			defer group.Done()
+			errorsFound <- runtime.AddFlow(flow)
+		}(testFlow(port))
+	}
+	group.Wait()
+	close(errorsFound)
+	for err := range errorsFound {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if atomic.LoadInt32(&concurrent) != 0 || len(runtime.currentRules.Flows) != 2 ||
+		runtime.RulesGeneration() != 3 {
+		t.Fatalf("writers were not serialized: generation=%d flows=%d",
+			runtime.RulesGeneration(), len(runtime.currentRules.Flows))
 	}
 }
 

@@ -35,11 +35,17 @@ type Stats struct {
 	ActionDrop, ActionForward  uint64
 	ActionRewrite              uint64
 	TXAccepted, TXUnsent, Drop uint64
+	RulesGeneration            uint64
+	RulesPublishSuccess        uint64
+	RulesPublishFailed         uint64
+	RulesReclaimed             uint64
 	PortsClosed, PoolInUse     uint
 	PoolFreed                  bool
 	FlowTableFreed             bool
 	RouteTableFreed            bool
 	ActionStoreFreed           bool
+	SnapshotFreed              bool
+	QSBRFreed                  bool
 }
 
 const (
@@ -129,22 +135,26 @@ func GetInfo() (Info, error) {
 		NBMbuf: uint(info.nb_mbuf), CacheSize: uint(info.cache_size), SocketID: int(info.socket_id)}, nil
 }
 
-// ConfigureRules 同步复制完整 snapshot；返回后 C 不再借用临时 rule array。
-func ConfigureRules(snapshot RuleSnapshot) error {
-	if len(snapshot.Flows) > MaxFlowRules || len(snapshot.Routes) > MaxRouteRules {
-		return fmt.Errorf("rule snapshot exceeds native capacity")
-	}
+type ruleArrays struct {
+	flows  *C.struct_dp_flow_rule
+	routes *C.struct_dp_route_rule
+}
 
-	var flows *C.struct_dp_flow_rule
+// newRuleArrays 只负责把 Go-owned snapshot 复制到调用期间存活的 C array。
+// native build 返回后不再借用这些数组，因此 caller 可以立即 release。
+func newRuleArrays(snapshot RuleSnapshot) (ruleArrays, error) {
+	if len(snapshot.Flows) > MaxFlowRules || len(snapshot.Routes) > MaxRouteRules {
+		return ruleArrays{}, fmt.Errorf("rule snapshot exceeds native capacity")
+	}
+	arrays := ruleArrays{}
 	if len(snapshot.Flows) != 0 {
-		flows = C.dp_flow_rules_alloc(C.size_t(len(snapshot.Flows)))
-		if flows == nil {
-			return fmt.Errorf("allocate flow rule array: out of memory")
+		arrays.flows = C.dp_flow_rules_alloc(C.size_t(len(snapshot.Flows)))
+		if arrays.flows == nil {
+			return ruleArrays{}, fmt.Errorf("allocate flow rule array: out of memory")
 		}
-		defer C.dp_rule_array_free(unsafe.Pointer(flows))
 		for i, rule := range snapshot.Flows {
 			action := rule.Action
-			C.dp_flow_rule_set(flows, C.size_t(i), C.uint32_t(rule.SrcIPv4),
+			C.dp_flow_rule_set(arrays.flows, C.size_t(i), C.uint32_t(rule.SrcIPv4),
 				C.uint32_t(rule.DstIPv4), C.uint16_t(rule.SrcPort),
 				C.uint16_t(rule.DstPort), C.uint8_t(rule.L4Proto),
 				C.uint8_t(action.Type), C.uint8_t(action.RewriteMask),
@@ -153,25 +163,53 @@ func ConfigureRules(snapshot RuleSnapshot) error {
 		}
 	}
 
-	var routes *C.struct_dp_route_rule
 	if len(snapshot.Routes) != 0 {
-		routes = C.dp_route_rules_alloc(C.size_t(len(snapshot.Routes)))
-		if routes == nil {
-			return fmt.Errorf("allocate route rule array: out of memory")
+		arrays.routes = C.dp_route_rules_alloc(C.size_t(len(snapshot.Routes)))
+		if arrays.routes == nil {
+			C.dp_rule_array_free(unsafe.Pointer(arrays.flows))
+			return ruleArrays{}, fmt.Errorf("allocate route rule array: out of memory")
 		}
-		defer C.dp_rule_array_free(unsafe.Pointer(routes))
 		for i, rule := range snapshot.Routes {
 			action := rule.Action
-			C.dp_route_rule_set(routes, C.size_t(i), C.uint32_t(rule.Prefix),
+			C.dp_route_rule_set(arrays.routes, C.size_t(i), C.uint32_t(rule.Prefix),
 				C.uint8_t(rule.Depth), C.uint8_t(action.Type),
 				C.uint8_t(action.RewriteMask), C.uint32_t(action.SrcIPv4),
 				C.uint32_t(action.DstIPv4), C.uint16_t(action.SrcPort),
 				C.uint16_t(action.DstPort))
 		}
 	}
+	return arrays, nil
+}
 
-	return status("configure static rules", C.dp_configure_rules(flows,
-		C.uint32_t(len(snapshot.Flows)), routes, C.uint32_t(len(snapshot.Routes))))
+func (arrays ruleArrays) release() {
+	C.dp_rule_array_free(unsafe.Pointer(arrays.flows))
+	C.dp_rule_array_free(unsafe.Pointer(arrays.routes))
+}
+
+// ConfigureRules 发布启动 generation 1；返回后 C 不借用临时 rule array。
+func ConfigureRules(snapshot RuleSnapshot) error {
+	arrays, err := newRuleArrays(snapshot)
+	if err != nil {
+		return err
+	}
+	defer arrays.release()
+	return status("configure initial rules", C.dp_configure_rules(arrays.flows,
+		C.uint32_t(len(snapshot.Flows)), arrays.routes,
+		C.uint32_t(len(snapshot.Routes))))
+}
+
+// PublishRules 是除 RequestStop 外唯一允许跨线程进入的 native lifecycle API。
+func PublishRules(snapshot RuleSnapshot) (uint64, error) {
+	arrays, err := newRuleArrays(snapshot)
+	if err != nil {
+		return 0, err
+	}
+	defer arrays.release()
+	var generation C.uint64_t
+	err = status("publish rules", C.dp_publish_rules(arrays.flows,
+		C.uint32_t(len(snapshot.Flows)), arrays.routes,
+		C.uint32_t(len(snapshot.Routes)), &generation))
+	return uint64(generation), err
 }
 
 func Setup(rxDevice, txDevice string) error {
@@ -195,9 +233,14 @@ func GetStats() (Stats, error) {
 		LookupMiss: uint64(s.lookup_miss), ActionDrop: uint64(s.action_drop),
 		ActionForward: uint64(s.action_forward), ActionRewrite: uint64(s.action_rewrite),
 		TXAccepted: uint64(s.tx_accepted), TXUnsent: uint64(s.tx_unsent),
-		Drop: uint64(s.drop), PortsClosed: uint(s.ports_closed), PoolInUse: uint(s.pool_in_use),
+		Drop: uint64(s.drop), RulesGeneration: uint64(s.rules_generation),
+		RulesPublishSuccess: uint64(s.rules_publish_success),
+		RulesPublishFailed:  uint64(s.rules_publish_failed),
+		RulesReclaimed:      uint64(s.rules_reclaimed),
+		PortsClosed:         uint(s.ports_closed), PoolInUse: uint(s.pool_in_use),
 		PoolFreed: s.pool_freed != 0, FlowTableFreed: s.flow_table_freed != 0,
-		RouteTableFreed: s.route_table_freed != 0, ActionStoreFreed: s.action_store_freed != 0}, nil
+		RouteTableFreed: s.route_table_freed != 0, ActionStoreFreed: s.action_store_freed != 0,
+		SnapshotFreed: s.snapshot_freed != 0, QSBRFreed: s.qsbr_freed != 0}, nil
 }
 func Cleanup() error {
 	err := status("EAL cleanup", C.dp_runtime_cleanup())
@@ -220,14 +263,18 @@ const (
 	testLiveWorker      = 1
 	testLivePort        = 2
 	testLiveMempool     = 3
-	testLiveFlowTable   = 4
-	testLiveRouteTable  = 5
-	testLiveActionStore = 6
+	testLiveActiveRules = 4
+	testLiveQSBR        = 5
+	testLiveWriter      = 6
 )
 
 // testCleanupGuard 直接返回 cleanup 的 errno，供 package 测试断言防御边界。
 func testCleanupGuard(resource int) error {
 	return status("EAL cleanup guard test", C.dp_test_runtime_cleanup_guard(C.int(resource)))
+}
+
+func testDynamicRulesQSBR() error {
+	return status("dynamic rules/QSBR test", C.dp_test_dynamic_rules_qsbr())
 }
 
 type testPacketMeta struct {

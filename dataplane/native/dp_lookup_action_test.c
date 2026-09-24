@@ -8,12 +8,15 @@
 
 #include <errno.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include <rte_byteorder.h>
 #include <rte_ether.h>
 #include <rte_ip4.h>
 #include <rte_mbuf.h>
+#include <rte_pause.h>
 #include <rte_tcp.h>
 #include <rte_udp.h>
 
@@ -128,28 +131,28 @@ test_lookup_semantics(void)
         first.reserved[1] != 0 || first.reserved[2] != 0)
         return -EIO;
 
-    if (dp_lookup_packet(&base, &action) != DP_LOOKUP_FLOW_HIT ||
+    if (dp_lookup_packet(&base, dp_rules_active_load(), &action) != DP_LOOKUP_FLOW_HIT ||
         action->type != DP_ACTION_FORWARD)
         return -EIO;
     meta = base;
     meta.src_ipv4++;
-    if (dp_lookup_packet(&meta, &action) != DP_LOOKUP_MISS)
+    if (dp_lookup_packet(&meta, dp_rules_active_load(), &action) != DP_LOOKUP_MISS)
         return -EIO;
     meta = base;
     meta.dst_ipv4++;
-    if (dp_lookup_packet(&meta, &action) != DP_LOOKUP_MISS)
+    if (dp_lookup_packet(&meta, dp_rules_active_load(), &action) != DP_LOOKUP_MISS)
         return -EIO;
     meta = base;
     meta.src_port++;
-    if (dp_lookup_packet(&meta, &action) != DP_LOOKUP_MISS)
+    if (dp_lookup_packet(&meta, dp_rules_active_load(), &action) != DP_LOOKUP_MISS)
         return -EIO;
     meta = base;
     meta.dst_port++;
-    if (dp_lookup_packet(&meta, &action) != DP_LOOKUP_MISS)
+    if (dp_lookup_packet(&meta, dp_rules_active_load(), &action) != DP_LOOKUP_MISS)
         return -EIO;
     meta = base;
     meta.l4_proto = IPPROTO_UDP;
-    if (dp_lookup_packet(&meta, &action) != DP_LOOKUP_MISS)
+    if (dp_lookup_packet(&meta, dp_rules_active_load(), &action) != DP_LOOKUP_MISS)
         return -EIO;
 
     meta = base;
@@ -158,18 +161,18 @@ test_lookup_semantics(void)
     meta.src_port = 3000;
     meta.dst_port = 4000;
     meta.l4_proto = IPPROTO_UDP;
-    if (dp_lookup_packet(&meta, &action) != DP_LOOKUP_FLOW_HIT ||
+    if (dp_lookup_packet(&meta, dp_rules_active_load(), &action) != DP_LOOKUP_FLOW_HIT ||
         action->type != DP_ACTION_REWRITE)
         return -EIO;
 
     meta.dst_ipv4 = 0x0a090807;
-    if (dp_lookup_packet(&meta, &action) != DP_LOOKUP_ROUTE_HIT ||
+    if (dp_lookup_packet(&meta, dp_rules_active_load(), &action) != DP_LOOKUP_ROUTE_HIT ||
         action->type != DP_ACTION_DROP)
         return -EIO;
     meta.dst_ipv4 = 0x0a010263;
     meta.src_port = 9999;
     meta.dst_port = 9998;
-    if (dp_lookup_packet(&meta, &action) != DP_LOOKUP_ROUTE_HIT ||
+    if (dp_lookup_packet(&meta, dp_rules_active_load(), &action) != DP_LOOKUP_ROUTE_HIT ||
         action->type != DP_ACTION_FORWARD)
         return -EIO;
 
@@ -179,11 +182,11 @@ test_lookup_semantics(void)
     meta.src_port = 1000;
     meta.dst_port = 2000;
     meta.l4_proto = IPPROTO_UDP;
-    if (dp_lookup_packet(&meta, &action) != DP_LOOKUP_FLOW_HIT ||
+    if (dp_lookup_packet(&meta, dp_rules_active_load(), &action) != DP_LOOKUP_FLOW_HIT ||
         action->type != DP_ACTION_DROP)
         return -EIO;
     meta.dst_ipv4 = 0xc6336401;
-    if (dp_lookup_packet(&meta, &action) != DP_LOOKUP_MISS)
+    if (dp_lookup_packet(&meta, dp_rules_active_load(), &action) != DP_LOOKUP_MISS)
         return -EIO;
     return 0;
 }
@@ -239,7 +242,7 @@ test_packet_actions(struct rte_mempool *pool)
 #define PROCESS_PACKET(packet)                                                     \
     do {                                                                           \
         stats.rx++;                                                                \
-        struct rte_mbuf *processed = dp_process_packet((packet), &stats);          \
+        struct rte_mbuf *processed = dp_process_packet((packet), &stats, dp_rules_active_load());          \
         if (processed)                                                             \
             candidates[candidate_count++] = processed;                             \
     } while (0)
@@ -338,16 +341,16 @@ dp_test_static_lookup_actions(void)
     if (!dp.initialized || dp.running || dp.pool || dp.rules_configured)
         return -EBUSY;
 
-    /* ConfigureRules 已创建 action/hash 后遇到非法 rule，Teardown helper 仍必须
-     * 能清掉 partial state，不能把失败配置留给 EAL cleanup。
+    /* builder 遇到非法 rule 时必须立即清掉 partial snapshot，active generation
+     * 保持为空；QSBR 由统一 teardown 回收。
      */
     test_set_flow(&invalid_flow, 1, 2, 3, 4, IPPROTO_ICMP,
                   test_action(DP_ACTION_DROP, 0, 0, 0, 0, 0));
     ret = dp_configure_rules(&invalid_flow, 1, NULL, 0);
-    if (ret != -EINVAL || !dp.flow_table || !dp.actions)
+    if (ret != -EINVAL || dp_rules_active_load() || !dp.rules_qsbr)
         return -EIO;
     dp_rules_teardown();
-    if (dp.flow_table || dp.actions || dp.rules_configured)
+    if (dp_rules_active_load() || dp.rules_qsbr || dp.rules_configured)
         return -EIO;
     dp.stats.flow_table_freed = 0;
     dp.stats.action_store_freed = 0;
@@ -400,10 +403,189 @@ dp_test_static_lookup_actions(void)
 
 out_rules:
     dp_rules_teardown();
-    if (ret == 0 && (dp.flow_table || dp.route_table || dp.actions ||
+    if (ret == 0 && (dp_rules_active_load() || dp.rules_qsbr ||
                      dp.rules_configured || !dp.stats.flow_table_freed ||
                      !dp.stats.route_table_freed ||
-                     !dp.stats.action_store_freed))
+                     !dp.stats.action_store_freed ||
+                     !dp.stats.snapshot_freed || !dp.stats.qsbr_freed))
+        ret = -EIO;
+    return ret;
+}
+
+struct test_publish_context {
+    const struct dp_flow_rule *flows;
+    uint32_t flow_count;
+    const struct dp_route_rule *routes;
+    uint32_t route_count;
+    uint64_t generation;
+    int result;
+    atomic_bool done;
+};
+
+struct test_idle_reader_context {
+    atomic_bool stop;
+};
+
+static void *
+test_publish_thread(void *argument)
+{
+    struct test_publish_context *context = argument;
+
+    context->result = dp_publish_rules(
+        context->flows, context->flow_count,
+        context->routes, context->route_count, &context->generation);
+    atomic_store_explicit(&context->done, true, memory_order_release);
+    return NULL;
+}
+
+static void *
+test_idle_reader_thread(void *argument)
+{
+    struct test_idle_reader_context *context = argument;
+
+    /* 模拟 worker 的 RX=0 分支：没有 packet 可处理时仍持续报告 quiescent。 */
+    while (!atomic_load_explicit(&context->stop, memory_order_acquire)) {
+        dp_rules_reader_quiescent();
+        rte_pause();
+    }
+    return NULL;
+}
+
+int
+dp_test_dynamic_rules_qsbr(void)
+{
+    const struct dp_rule_action drop =
+        test_action(DP_ACTION_DROP, 0, 0, 0, 0, 0);
+    const struct dp_rule_action forward =
+        test_action(DP_ACTION_FORWARD, 0, 0, 0, 0, 0);
+    const struct dp_rule_action rewrite =
+        test_action(DP_ACTION_REWRITE, DP_REWRITE_DST_PORT,
+                    0, 0, 0, 9000);
+    struct dp_flow_rule initial;
+    struct dp_flow_rule updated;
+    struct dp_flow_rule invalid;
+    struct dp_packet_meta meta = {
+        .src_ipv4 = 0xc0000201,
+        .dst_ipv4 = 0xc6336402,
+        .src_port = 1234,
+        .dst_port = 5678,
+        .l4_proto = IPPROTO_UDP,
+    };
+    struct test_publish_context context = {.done = ATOMIC_VAR_INIT(false)};
+    struct test_idle_reader_context idle = {.stop = ATOMIC_VAR_INIT(false)};
+    const struct dp_rule_action *found;
+    struct dp_rule_snapshot *active;
+    pthread_t writer;
+    pthread_t idle_reader;
+    uint64_t generation;
+    uint64_t reclaimed_before;
+    int ret = 0;
+
+    if (!dp.initialized || dp.running || dp.pool || dp.rules_configured)
+        return -EBUSY;
+    test_set_flow(&initial, meta.src_ipv4, meta.dst_ipv4,
+                  meta.src_port, meta.dst_port, meta.l4_proto, drop);
+    test_set_flow(&updated, meta.src_ipv4, meta.dst_ipv4,
+                  meta.src_port, meta.dst_port, meta.l4_proto, rewrite);
+    test_set_flow(&invalid, meta.src_ipv4, meta.dst_ipv4,
+                  meta.src_port, meta.dst_port, IPPROTO_ICMP, forward);
+
+    ret = dp_configure_rules(&initial, 1, NULL, 0);
+    if (ret < 0)
+        goto out;
+    active = dp_rules_active_load();
+    if (!active || active->generation != 1 ||
+        dp_lookup_packet(&meta, active, &found) != DP_LOOKUP_FLOW_HIT ||
+        found->type != DP_ACTION_DROP) {
+        ret = -EIO;
+        goto out;
+    }
+
+    dp.ready = true;
+    ret = dp_rules_reader_register();
+    if (ret < 0)
+        goto out;
+    context.flows = &updated;
+    context.flow_count = 1;
+    reclaimed_before = dp.stats.rules_reclaimed;
+    if (pthread_create(&writer, NULL, test_publish_thread, &context) != 0) {
+        ret = -EIO;
+        dp_rules_reader_unregister();
+        goto out;
+    }
+
+    /* writer 应先完成 pointer exchange，再被尚未 quiescent 的 reader 阻塞。 */
+    for (uint32_t spin = 0; spin < 100000000; spin++) {
+        active = dp_rules_active_load();
+        if (active && active->generation == 2)
+            break;
+        rte_pause();
+    }
+    active = dp_rules_active_load();
+    if (!active || active->generation != 2 ||
+        dp_lookup_packet(&meta, active, &found) != DP_LOOKUP_FLOW_HIT ||
+        found->type != DP_ACTION_REWRITE ||
+        dp.stats.rules_reclaimed != reclaimed_before ||
+        atomic_load_explicit(&context.done, memory_order_acquire)) {
+        ret = -EIO;
+    }
+    dp_rules_reader_quiescent();
+    if (pthread_join(writer, NULL) != 0)
+        ret = -EIO;
+    if (ret == 0 && (context.result != 0 || context.generation != 2 ||
+                     dp.stats.rules_reclaimed != reclaimed_before + 1))
+        ret = -EIO;
+    if (ret < 0)
+        goto out_reader;
+
+    /* reader 保持 online，但只执行 RX=0 quiescent；同步 publish 必须能够完成。 */
+    updated.action = forward;
+    if (pthread_create(&idle_reader, NULL, test_idle_reader_thread, &idle) != 0) {
+        ret = -EIO;
+        goto out_reader;
+    }
+    ret = dp_publish_rules(&updated, 1, NULL, 0, &generation);
+    atomic_store_explicit(&idle.stop, true, memory_order_release);
+    if (pthread_join(idle_reader, NULL) != 0)
+        ret = -EIO;
+    if (ret == 0 && (generation != 3 || dp.stats.rules_reclaimed != 2))
+        ret = -EIO;
+
+out_reader:
+    dp_rules_reader_unregister();
+    if (ret < 0)
+        goto out;
+
+    active = dp_rules_active_load();
+    if (dp_publish_rules(&invalid, 1, NULL, 0, &generation) != -EINVAL ||
+        dp_rules_active_load() != active || active->generation != 3 ||
+        dp.stats.rules_generation != 3 ||
+        dp_lookup_packet(&meta, active, &found) != DP_LOOKUP_FLOW_HIT ||
+        found->type != DP_ACTION_FORWARD) {
+        ret = -EIO;
+        goto out;
+    }
+
+    /* reader 已 offline；50 次同步 publish 应立即完成并逐代回收。 */
+    for (uint32_t i = 0; i < 50; i++) {
+        updated.action = (i & 1U) == 0 ? forward : rewrite;
+        ret = dp_publish_rules(&updated, 1, NULL, 0, &generation);
+        if (ret < 0)
+            goto out;
+    }
+    active = dp_rules_active_load();
+    if (!active || generation != 53 || active->generation != 53 ||
+        dp.stats.rules_generation != 53 ||
+        dp.stats.rules_publish_success != 53 ||
+        dp.stats.rules_publish_failed != 1 ||
+        dp.stats.rules_reclaimed != 52)
+        ret = -EIO;
+
+out:
+    dp.ready = false;
+    dp_rules_teardown();
+    if (ret == 0 && (dp_rules_active_load() || dp.rules_qsbr ||
+                     !dp.stats.snapshot_freed || !dp.stats.qsbr_freed))
         ret = -EIO;
     return ret;
 }

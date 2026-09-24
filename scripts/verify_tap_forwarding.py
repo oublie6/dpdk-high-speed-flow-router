@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Goal 004-005 双 TAP 软件端到端验证；只操作本进程创建的接口。"""
+"""Goal 006-007 动态规则/QSBR 双 TAP 验证；只操作本进程创建的接口。"""
 import argparse
 import json
 import os
@@ -16,20 +16,14 @@ import uuid
 ETHERTYPE = 0x0800
 SRC_IP = "192.0.2.1"
 FLOW_DROP_DST = "198.51.100.10"
-FLOW_REWRITE_DST = "203.0.113.20"
 REWRITTEN_DST = "192.0.2.99"
-ROUTE_FORWARD_DST = "198.51.100.30"
 LOOKUP_MISS_DST = "203.0.113.40"
 SRC_PORT = 12345
 FLOW_DROP_PORT = 20001
-FLOW_REWRITE_PORT = 20002
 REWRITTEN_PORT = 30002
-ROUTE_FORWARD_PORT = 20003
 LOOKUP_MISS_PORT = 20004
 
 MARKER_FLOW_DROP = b"goal004-flow-drop"
-MARKER_FLOW_REWRITE = b"goal004-flow-rewrite"
-MARKER_ROUTE_FORWARD = b"goal004-route-forward"
 MARKER_LOOKUP_MISS = b"goal004-lookup-miss"
 MARKER_MALFORMED = b"goal003-malformed"
 
@@ -101,22 +95,25 @@ def verify_ipv4_udp_checksums(frame):
         raise AssertionError("rewritten UDP checksum is invalid")
 
 
-def write_rules(path):
+def write_rules(path, generation):
+    if generation not in (1, 2, 3):
+        raise ValueError("generation 必须是 1、2 或 3")
+    flows = []
+    if generation == 1:
+        action = {"type": "drop"}
+    elif generation == 2:
+        action = {"type": "rewrite", "dst_ipv4": REWRITTEN_DST,
+                  "dst_port": REWRITTEN_PORT}
+    else:
+        action = None
+    if action is not None:
+        flows.append({
+            "src_ipv4": SRC_IP, "dst_ipv4": FLOW_DROP_DST,
+            "src_port": SRC_PORT, "dst_port": FLOW_DROP_PORT,
+            "protocol": "udp", "action": action,
+        })
     rules = {
-        "flows": [
-            {
-                "src_ipv4": SRC_IP, "dst_ipv4": FLOW_DROP_DST,
-                "src_port": SRC_PORT, "dst_port": FLOW_DROP_PORT,
-                "protocol": "udp", "action": {"type": "drop"},
-            },
-            {
-                "src_ipv4": SRC_IP, "dst_ipv4": FLOW_REWRITE_DST,
-                "src_port": SRC_PORT, "dst_port": FLOW_REWRITE_PORT,
-                "protocol": "udp",
-                "action": {"type": "rewrite", "dst_ipv4": REWRITTEN_DST,
-                           "dst_port": REWRITTEN_PORT},
-            },
-        ],
+        "flows": flows,
         "routes": [
             {"prefix": "198.0.0.0/8", "action": {"type": "drop"}},
             {"prefix": "198.51.100.0/24", "action": {"type": "forward"}},
@@ -175,10 +172,10 @@ def main():
                 process.wait(timeout=3)
                 raise RuntimeError("graceful stop 超时，已强制回收测试子进程")
 
-    with tempfile.TemporaryDirectory(prefix="dfr-goal004005-") as temp:
+    with tempfile.TemporaryDirectory(prefix="dfr-goal006007-") as temp:
         log_path = Path(temp) / "router.log"
         rules_path = Path(temp) / "rules.json"
-        write_rules(rules_path)
+        write_rules(rules_path, 1)
         with log_path.open("w+") as log:
             try:
                 command = [str(binary), "--rules-file", str(rules_path),
@@ -206,44 +203,85 @@ def main():
                 injector = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
                 injector.bind((rx_iface, 0))
 
-                flow_drop = build_udp_frame(FLOW_DROP_DST, FLOW_DROP_PORT,
-                                            MARKER_FLOW_DROP, 0x4001)
-                flow_rewrite = build_udp_frame(FLOW_REWRITE_DST, FLOW_REWRITE_PORT,
-                                               MARKER_FLOW_REWRITE, 0x4002)
+                def send_frame(frame):
+                    injector.settimeout(remaining())
+                    if injector.send(frame) != len(frame):
+                        raise RuntimeError("raw socket 未完整注入测试 frame")
+
+                def receive_marker(marker, expected):
+                    while True:
+                        capture.settimeout(remaining())
+                        packet, address = capture.recvfrom(65535)
+                        if address[2] == socket.PACKET_OUTGOING:
+                            continue
+                        if marker in packet:
+                            if packet != expected:
+                                raise AssertionError("marker frame 与预期不一致")
+                            return packet
+
+                def assert_marker_absent(marker, duration=0.35):
+                    local_deadline = min(deadline, time.monotonic() + duration)
+                    while time.monotonic() < local_deadline:
+                        capture.settimeout(min(0.05, local_deadline - time.monotonic()))
+                        try:
+                            packet, address = capture.recvfrom(65535)
+                        except socket.timeout:
+                            continue
+                        if address[2] != socket.PACKET_OUTGOING and marker in packet:
+                            raise AssertionError("DROP marker 被错误转发")
+
+                def wait_log(text):
+                    while text not in log_path.read_text():
+                        remaining()
+                        if process.poll() is not None:
+                            raise RuntimeError("router 在 reload 期间退出")
+                        time.sleep(min(0.02, remaining()))
+
+                dynamic = build_udp_frame(FLOW_DROP_DST, FLOW_DROP_PORT,
+                                          MARKER_FLOW_DROP, 0x4001)
                 expected_rewrite = build_udp_frame(REWRITTEN_DST, REWRITTEN_PORT,
-                                                   MARKER_FLOW_REWRITE, 0x4002)
-                route_forward = build_udp_frame(ROUTE_FORWARD_DST, ROUTE_FORWARD_PORT,
-                                                MARKER_ROUTE_FORWARD, 0x4003)
+                                                   MARKER_FLOW_DROP, 0x4001)
                 lookup_miss = build_udp_frame(LOOKUP_MISS_DST, LOOKUP_MISS_PORT,
                                               MARKER_LOOKUP_MISS, 0x4004)
                 malformed = build_malformed_frame()
-                frames = [malformed, flow_drop, lookup_miss, flow_rewrite, route_forward]
                 if not args.skip_injection:
-                    injector.settimeout(remaining())
-                    for frame in frames:
-                        if injector.send(frame) != len(frame):
-                            raise RuntimeError("raw socket 未完整注入测试 frame")
+                    # generation 1：exact flow DROP 覆盖同时匹配的 /24 FORWARD。
+                    send_frame(dynamic)
+                    assert_marker_absent(MARKER_FLOW_DROP)
 
-                captured = set()
-                forbidden = (MARKER_FLOW_DROP, MARKER_LOOKUP_MISS, MARKER_MALFORMED)
-                while captured != {"rewrite", "route"}:
-                    capture.settimeout(remaining())
-                    packet, address = capture.recvfrom(65535)
-                    if address[2] == socket.PACKET_OUTGOING:
-                        continue
-                    if any(marker in packet for marker in forbidden):
-                        raise AssertionError("DROP/malformed marker 被错误转发")
-                    if MARKER_FLOW_REWRITE in packet:
-                        if packet != expected_rewrite:
-                            raise AssertionError("flow REWRITE frame 与预期不一致")
-                        verify_ipv4_udp_checksums(packet)
-                        captured.add("rewrite")
-                    if MARKER_ROUTE_FORWARD in packet:
-                        if packet != route_forward:
-                            raise AssertionError("route FORWARD 未保持完整 frame")
-                        captured.add("route")
-                print("flow precedence DROP PASS; UDP REWRITE + checksum PASS; "
-                      "route /24 FORWARD unchanged PASS; lookup miss DROP PASS", flush=True)
+                    # generation 2：同一 PID/EAL/port/pool，仅替换 immutable rules。
+                    write_rules(rules_path, 2)
+                    process.send_signal(signal.SIGHUP)
+                    wait_log("rules reload succeeded: generation=2")
+                    send_frame(dynamic)
+                    rewritten = receive_marker(MARKER_FLOW_DROP, expected_rewrite)
+                    verify_ipv4_udp_checksums(rewritten)
+
+                    # JSON reload 失败必须保留 generation 2 及其 packet behavior。
+                    rules_path.write_text('{"flows": [\n')
+                    process.send_signal(signal.SIGHUP)
+                    wait_log("rules reload failed:")
+                    send_frame(dynamic)
+                    rewritten = receive_marker(MARKER_FLOW_DROP, expected_rewrite)
+                    verify_ipv4_udp_checksums(rewritten)
+
+                    # generation 3：删除 exact flow 后，同一个原始包回退到 route。
+                    write_rules(rules_path, 3)
+                    process.send_signal(signal.SIGHUP)
+                    wait_log("rules reload succeeded: generation=3")
+                    send_frame(dynamic)
+                    receive_marker(MARKER_FLOW_DROP, dynamic)
+
+                    send_frame(malformed)
+                    send_frame(lookup_miss)
+                    assert_marker_absent(MARKER_MALFORMED)
+                    assert_marker_absent(MARKER_LOOKUP_MISS)
+
+                if process.poll() is not None:
+                    raise AssertionError("dynamic reload 改变了 flow-router PID 生命周期")
+                print("same PID generation 1 DROP -> generation 2 REWRITE + checksum "
+                      "-> generation 3 route FORWARD unchanged PASS; invalid reload "
+                      "kept generation 2 behavior PASS", flush=True)
 
                 process.send_signal(signal.SIGTERM)
                 process.wait(timeout=remaining())
@@ -258,14 +296,14 @@ def main():
                     log_text,
                 )
                 if not match:
-                    raise AssertionError("缺少最终 Goal004-005 stats")
+                    raise AssertionError("缺少最终 packet stats")
                 values = list(map(int, match.groups()))
                 (rx, parse_ok, unsupported, malformed_count, flow_hit, route_hit,
                  lookup_miss_count, action_drop, action_forward, action_rewrite,
                  tx, unsent, drop) = values
-                if malformed_count < 1 or flow_hit < 2 or route_hit < 1 or lookup_miss_count < 1:
+                if malformed_count < 1 or flow_hit < 3 or route_hit < 1 or lookup_miss_count < 1:
                     raise AssertionError("deterministic parse/lookup case 未全部计数")
-                if action_drop < 2 or action_forward < 1 or action_rewrite < 1:
+                if action_drop < 2 or action_forward < 1 or action_rewrite < 2:
                     raise AssertionError("deterministic action case 未全部计数")
                 if rx != parse_ok + unsupported + malformed_count:
                     raise AssertionError("rx parser 分类守恒失败")
@@ -277,9 +315,15 @@ def main():
                     raise AssertionError("action TX ownership 守恒失败")
                 if drop != unsupported + malformed_count + action_drop + unsent:
                     raise AssertionError("drop ownership 守恒失败")
+                rules_stats = ("rules: generation=3 publish_success=3 "
+                               "publish_failed=0 reclaimed=2")
+                if rules_stats not in log_text:
+                    raise AssertionError("generation/publish/reclaim stats 不符合预期")
+                if log_text.count("EAL init succeeded") != 1 or log_text.count("rx device:") != 1:
+                    raise AssertionError("动态更新期间 EAL 或 port 被重新初始化")
                 teardown = ("teardown: ports_closed=2 pool_in_use=0 pool_freed=true "
                             "flow_table_freed=true route_table_freed=true "
-                            "action_store_freed=true")
+                            "action_store_freed=true snapshot_freed=true qsbr_freed=true")
                 if teardown not in log_text:
                     raise AssertionError("缺少 port/pool/lookup/action 完整释放证据")
                 if "EAL cleanup succeeded" not in log_text:
@@ -312,8 +356,8 @@ def main():
         print(log_text, end="")
     if error is not None:
         raise RuntimeError(str(error) or type(error).__name__)
-    print("PASS: Goal004-005 exact flow/LPM/action/rewrite, stats conservation, "
-          "graceful cleanup, no test interfaces/process/temp files remain")
+    print("PASS: Goal006-007 same-PID dynamic snapshot/QSBR publication, old-generation "
+          "reclaim, regressions, graceful cleanup, no test interfaces/process/temp files remain")
 
 
 if __name__ == "__main__":

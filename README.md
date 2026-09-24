@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**合并 Goal 004-005 已验收通过，当前进入 Goal 006-007：动态规则 + QSBR。**
+**Goal 006-007 已由 Codex 完成，当前等待 ChatGPT 复验。**
 
 当前已经完成：
 
@@ -34,6 +34,13 @@
 - 统一 immutable action store，以及 DROP / FORWARD / REWRITE；
 - IPv4、TCP、UDP 部分字段原地 rewrite 与软件 checksum 重算；
 - lookup/action stats、资源 cleanup guard、确定性单元测试和 Goal004-005 TAP 回归。
+- Go `ReplaceRules`、flow/route Add/Delete 与 Go-owned current snapshot；
+- whole immutable native rule snapshot、C11 atomic pointer publication；
+- DPDK QSBR reader register/online/quiescent/offline/unregister；
+- grace period 后整代回收旧 hash/LPM/action/snapshot；
+- `SIGHUP` 运行期 JSON reload，失败时保留旧 generation 和 packet behavior；
+- 同一 PID 内 generation 1 DROP -> generation 2 REWRITE -> generation 3 route FORWARD；
+- 50 次连续 publish、build rollback、idle reader 与 snapshot/QSBR cleanup 回归。
 
 尚未实现：
 
@@ -97,12 +104,12 @@ TAP RTC 端到端验证：
 ./scripts/verify_tap_forwarding.sh
 ~~~
 
-脚本在临时目录生成静态 rules JSON 和两张短名称 TAP，只把本次接口设为 UP。它
-注入 flow DROP、flow REWRITE、route FORWARD、lookup miss 与 malformed 五类确定性
-IPv4/UDP packet，逐字节验证 FORWARD 不改包、REWRITE 结果和 IPv4/UDP checksum，
-并证明 flow DROP 优先于同时匹配的 route FORWARD。结束时检查五条 stats 守恒、
-lookup/action resource free、port close、mempool free、EAL cleanup，以及无进程、
-接口和临时文件残留。它不配置 IP、主机 route 或 firewall。
+脚本在临时目录生成 rules JSON 和两张短名称 TAP，只把本次接口设为 UP。它在同一
+PID/EAL/port/mempool 内通过两次 SIGHUP 发布 generation 2、3，验证同一个 UDP flow
+依次执行 DROP、REWRITE、route FORWARD；同时验证无效 reload 保持旧行为、rewrite
+checksum、malformed/lookup miss、五条 packet stats 守恒、旧代回收、snapshot/QSBR、
+port、mempool 与 EAL cleanup，以及无进程、接口和临时文件残留。它不配置 IP、主机
+route 或 firewall。
 
 推荐通过项目入口构建和测试：
 
@@ -131,7 +138,8 @@ FLOW_ROUTER_TEST_CPU="$EAL_CPU" \
 
 普通测试会运行 deterministic parser fixture 与 JSON 校验；设置
 `FLOW_ROUTER_TEST_CPU` 后还会运行真实 EAL、TX partial-return ownership、
-`rte_hash`/`rte_lpm`、DROP/FORWARD/REWRITE ownership 和 TCP/UDP checksum 测试。
+`rte_hash`/`rte_lpm`、DROP/FORWARD/REWRITE ownership、TCP/UDP checksum，以及
+QSBR reader lifecycle、quiescent 前后回收边界、失败回滚和 50 次 publish 测试。
 这里的结果只证明 software/TAP 功能正确性，
 不证明真实 NIC DMA、hardware RSS、NUMA cost、line-rate 或吞吐性能。
 
@@ -169,8 +177,37 @@ FLOW_ROUTER_TEST_CPU="$EAL_CPU" \
 
 `action.type` 只能是 `drop`、`forward`、`rewrite`。rewrite 至少设置一个
 `src_ipv4`、`dst_ipv4`、`src_port`、`dst_port`；flow protocol 只能是 `tcp` 或
-`udp`。lookup 顺序固定为 exact flow、IPv4 LPM route、default DROP。规则只在
-`Run` 前发布，当前没有运行期 Add/Delete/Replace/reload。
+`udp`。lookup 顺序固定为 exact flow、IPv4 LPM route、default DROP。该文件先作为
+generation 1 发布；运行中收到 SIGHUP 时会重新读取、校验并整代替换，失败不会停止
+worker 或改变旧 generation。
+
+## Goal 006-007：动态规则与 QSBR
+
+控制面提供：
+
+~~~go
+ReplaceRules(snapshot)
+AddFlow(rule)
+DeleteFlow(key)
+AddRoute(rule)
+DeleteRoute(key)
+~~~
+
+每次 CRUD 都 clone 当前 Go snapshot，完成校验后构建完整 native generation。C writer
+通过 atomic exchange 发布新 pointer，再等待 DPDK QSBR grace period，最后整体释放旧
+generation 的 hash、LPM、action store 和 snapshot。worker 每个 RX burst acquire-load
+一次 pointer，整个 burst 使用同一代；即使 RX=0 也报告 quiescent。
+
+手工触发 reload：
+
+~~~sh
+kill -HUP <flow-router-pid>
+~~~
+
+成功日志为 `rules reload succeeded: generation=N`。JSON、校验或 native build 失败只打印
+control-plane error，旧 snapshot 继续处理 packet。详细 ownership、memory order 与测试
+证据见 [架构说明](docs/architecture.md) 和
+[Goal 006-007](docs/goals/006-007-dynamic-rules-qsbr.md)。
 
 ## 为什么做这个项目
 
@@ -439,7 +476,7 @@ Goal 002 / Goal 002R / Goal 003 / 合并 Goal 004-005 已正式验收通过：
 [Goal 004-005：Static Lookup + DROP / FORWARD / REWRITE](docs/goals/004-005-static-lookup-action-rewrite.md)
 
 本阶段已经完成 static exact-flow/LPM lookup、DROP/FORWARD/REWRITE、rewrite checksum
-与启动前 JSON snapshot。运行期 Add/Delete/Replace/reload、RCU/QSBR、RSS、多 queue 和多 lcore 仍未实现。下一步进入后续收尾阶段设计。
+与启动 generation 1。
 
 开发协作规则见 [AGENTS.md](AGENTS.md)。
 
@@ -458,7 +495,7 @@ DPDK 项目阶段性封板
 VPP / GoVPP
 ~~~
 
-当前执行：
+当前已完成、待复验：
 
 [Goal 006-007：Dynamic Rule Publication + RCU/QSBR](docs/goals/006-007-dynamic-rules-qsbr.md)
 
@@ -474,3 +511,6 @@ Go CRUD
 ~~~
 
 Web/API 暂缓，避免偏离高性能数据面主线。
+
+复验通过后的下一阶段是 Goal 008-009；本次实现没有进入 RSS、multi-queue、
+multi-lcore 或 benchmark。

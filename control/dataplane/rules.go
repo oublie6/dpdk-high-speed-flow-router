@@ -24,10 +24,22 @@ type FlowRule struct {
 	Action           RuleAction
 }
 
+// FlowKey 明确区分 exact-match key 与携带 action 的完整 FlowRule。
+type FlowKey struct {
+	SrcIPv4, DstIPv4 uint32
+	SrcPort, DstPort uint16
+	L4Proto          uint8
+}
+
 type RouteRule struct {
 	Prefix uint32
 	Depth  uint8
 	Action RuleAction
+}
+
+type RouteKey struct {
+	Prefix uint32
+	Depth  uint8
 }
 
 type RuleAction struct {
@@ -321,4 +333,119 @@ func toNativeRules(snapshot RuleSnapshot) native.RuleSnapshot {
 		}
 	}
 	return result
+}
+
+func flowRuleKey(rule FlowRule) FlowKey {
+	return FlowKey{SrcIPv4: rule.SrcIPv4, DstIPv4: rule.DstIPv4,
+		SrcPort: rule.SrcPort, DstPort: rule.DstPort, L4Proto: rule.L4Proto}
+}
+
+func routeRuleKey(rule RouteRule) RouteKey {
+	return RouteKey{Prefix: rule.Prefix, Depth: rule.Depth}
+}
+
+// publishSnapshotLocked 只在 rulesMu 持有期间调用。native 成功并完成旧代回收后，
+// 才替换 Go-owned currentRules，因此失败不会造成两侧 generation 分歧。
+func (r *Runtime) publishSnapshotLocked(snapshot RuleSnapshot) error {
+	if !r.rulesOpen {
+		return fmt.Errorf("runtime rule publication is not available")
+	}
+	generation, err := r.publishRules(toNativeRules(snapshot))
+	if err != nil {
+		return err
+	}
+	r.currentRules = cloneRules(snapshot)
+	r.generation = generation
+	return nil
+}
+
+func (r *Runtime) ReplaceRules(snapshot RuleSnapshot) error {
+	candidate := cloneRules(snapshot)
+	if err := validateRules(candidate); err != nil {
+		return fmt.Errorf("replace rules: %w", err)
+	}
+	<-r.ready
+	r.rulesMu.Lock()
+	defer r.rulesMu.Unlock()
+	return r.publishSnapshotLocked(candidate)
+}
+
+func (r *Runtime) AddFlow(rule FlowRule) error {
+	<-r.ready
+	r.rulesMu.Lock()
+	defer r.rulesMu.Unlock()
+	candidate := cloneRules(r.currentRules)
+	wanted := flowRuleKey(rule)
+	for _, existing := range candidate.Flows {
+		if flowRuleKey(existing) == wanted {
+			return fmt.Errorf("add flow: duplicate key")
+		}
+	}
+	candidate.Flows = append(candidate.Flows, rule)
+	if err := validateRules(candidate); err != nil {
+		return fmt.Errorf("add flow: %w", err)
+	}
+	return r.publishSnapshotLocked(candidate)
+}
+
+func (r *Runtime) DeleteFlow(key FlowKey) error {
+	<-r.ready
+	r.rulesMu.Lock()
+	defer r.rulesMu.Unlock()
+	candidate := cloneRules(r.currentRules)
+	index := -1
+	for i, existing := range candidate.Flows {
+		if flowRuleKey(existing) == key {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return fmt.Errorf("delete flow: key does not exist")
+	}
+	candidate.Flows = append(candidate.Flows[:index], candidate.Flows[index+1:]...)
+	return r.publishSnapshotLocked(candidate)
+}
+
+func (r *Runtime) AddRoute(rule RouteRule) error {
+	<-r.ready
+	r.rulesMu.Lock()
+	defer r.rulesMu.Unlock()
+	candidate := cloneRules(r.currentRules)
+	wanted := routeRuleKey(rule)
+	for _, existing := range candidate.Routes {
+		if routeRuleKey(existing) == wanted {
+			return fmt.Errorf("add route: duplicate key")
+		}
+	}
+	candidate.Routes = append(candidate.Routes, rule)
+	if err := validateRules(candidate); err != nil {
+		return fmt.Errorf("add route: %w", err)
+	}
+	return r.publishSnapshotLocked(candidate)
+}
+
+func (r *Runtime) DeleteRoute(key RouteKey) error {
+	<-r.ready
+	r.rulesMu.Lock()
+	defer r.rulesMu.Unlock()
+	candidate := cloneRules(r.currentRules)
+	index := -1
+	for i, existing := range candidate.Routes {
+		if routeRuleKey(existing) == key {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return fmt.Errorf("delete route: key does not exist")
+	}
+	candidate.Routes = append(candidate.Routes[:index], candidate.Routes[index+1:]...)
+	return r.publishSnapshotLocked(candidate)
+}
+
+func (r *Runtime) RulesGeneration() uint64 {
+	r.rulesMu.Lock()
+	defer r.rulesMu.Unlock()
+	return r.generation
 }

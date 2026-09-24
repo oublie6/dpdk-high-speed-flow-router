@@ -1,154 +1,166 @@
-# 架构说明：Goal 004-005 Static Lookup 与 Packet Action
+# 架构说明：Dynamic Rule Snapshot 与 DPDK QSBR
 
 ## 1. 当前实现
 
-Goal 004-005 在 Goal 003 parser 后加入不可变 lookup/action snapshot：
+当前数据路径为：
 
 ~~~text
-Go CLI / static JSON / signal handler
+Go CLI / JSON / SIGHUP / Runtime CRUD
         |
-control/dataplane        JSON 校验 + lifecycle manager
+control/dataplane        校验、Go-owned snapshot、writer mutex
         |
-dataplane/native         唯一 cgo package + package-local C
+dataplane/native         thin cgo、C writer mutex、snapshot builder
         |
-DPDK EAL -> TAP RX/RXQ0 -> fixed owner lcore
+        +-> atomic active_rules exchange -> DPDK QSBR -> reclaim old generation
+        |
+DPDK EAL -> TAP RXQ0 -> fixed owner lcore
+         -> burst 级 acquire-load snapshot
          -> Ethernet/IPv4/TCP/UDP parse
-         -> exact flow -> IPv4 LPM fallback -> action -> TAP TX/TXQ0
+         -> exact flow -> IPv4 LPM fallback -> action -> TAP TXQ0
+         -> quiescent
 ~~~
 
-worker 在每次 RX burst 后先记录 RX，再逐包完成 parse、lookup 和 action。DROP packet
-立即 free；FORWARD 与成功 REWRITE 的 mbuf 在原 RX pointer 数组中压缩后执行一次
-TX burst。当前没有 runtime rule update、RSS、multi-queue 或 multi-lcore。
+packet hot path 仍全部位于 C。Go 不逐包跨 cgo；worker 不使用 mutex、refcount、逐包
+allocation或逐包日志。当前只有一个 RXQ、一个 worker reader 和一个 TXQ，但 QSBR
+reader capacity 按 `RTE_MAX_LCORE` 分配，reader ID 与注册点已经显式化，后续可以增加
+reader，而无需改变 snapshot ownership 模型。
 
-## 2. 构建与模块组织
+## 2. 从静态全局资源到整代 snapshot
 
-所有项目 native 文件都在 `dataplane/native`，由 cgo 作为同一 package 的 source
-跟踪：
+Goal 004-005 的旧假设是 Run 期间规则不变，因此 `flow_table`、`route_table` 和
+`actions` 可以作为三个独立字段保存在全局 `dp_state`。运行期 publish 引入后，这种
+布局会允许 worker 观察到 generation N 的 table 与 generation N+1 的 action store，
+产生悬空指针或错误 action。
 
-~~~text
-binding_linux.go          cgo 与 C memory 转换
-dp_binding.c/.h           argv/rule array 的命名 helper
-dp_api.h                  粗粒度项目 API 与跨边界数值结构
-dp_internal.h             C-only runtime state
-dp_runtime.c              EAL、状态快照与 cleanup guard
-dp_port.c                 port / queue / mempool / rules teardown
-dp_worker.c/.h            RTC loop 与单包 ownership
-dp_packet.h               metadata 与 parse result
-dp_parser.c/.h            Ethernet/IPv4/TCP/UDP parser
-dp_parser_test.c           deterministic parser fixture
-dp_lookup.c/.h            rte_hash、rte_lpm、action store lifecycle
-dp_action.c/.h            IPv4/TCP/UDP rewrite 与 checksum
-dp_lookup_action_test.c    lookup/action/ownership fixture
-dp_tx.c/.h                TX partial-return ownership
-dp_test.h                  package-private test hooks
-~~~
-
-普通 `go build` / `go test` 能发现 C 改动，不需要 `go build -a` 或第二套 Meson
-工程。DPDK flags 由 `pkg-config libdpdk` 提供；旧版 cgo 的精确 allowlist 只由 Makefile
-在项目进程中 export，安装脚本不修改用户 persistent Go environment。
-
-`control/dataplane` 不 import C，也不接触 mbuf。它只导入 `dataplane/native`，管理
-config、ready、stop、wait 和 owner goroutine。源码编译期与运行时均锁定 DPDK
-25.11.3。
-
-## 3. EAL、规则与 owner thread 生命周期
-
-Go goroutine 会在 OS thread 间迁移，而 EAL 会设置 thread-local lcore state 与
-CPU affinity。因此整个生命周期固定在一个 `runtime.LockOSThread()` goroutine：
-
-~~~text
-native.Init(EAL argv)
--> native.GetInfo()
--> native.ConfigureRules(static snapshot)
--> native.Setup(TAP ports, pool, queues)
--> close ready channel
--> native.Run()                 blocking C RTC loop
--> atomic stop observed
--> worker returns / 无 pending mbuf
--> native.Teardown()            rules -> ports -> pool
--> native.GetStats()
--> Teardown 成功：native.Cleanup()
--> Teardown 失败：返回错误，不调用 Cleanup，由进程退出兜底
-~~~
-
-另一个 goroutine 只允许调用 `native.RequestStop()`，该函数只写 C11 atomic flag。
-EAL 是 process-global 且不能重新初始化；同一进程拒绝第二次 lifecycle，集成测试使用
-独立子进程隔离。
-
-Go owner 显式保存 `teardownErr`，只有 Teardown 成功才调用 Cleanup。C 的
-`dp_runtime_cleanup()` 同时检查 worker、port、pool、flow table、route table、action
-store 和规则配置状态；任何资源仍存活都返回 `-EBUSY`，不得进入
-`rte_eal_cleanup()`。
-
-## 4. 静态 JSON 与 cgo ownership
-
-CLI 的 `--rules-file <json>` 只在启动前读取一次。Go 使用 strict JSON decoder，拒绝
-未知字段、尾随值、非 IPv4 地址、非法 CIDR、非 TCP/UDP protocol、非法 action、
-空 rewrite、duplicate flow、规范化后重复 route 与 capacity overflow。CIDR 会 mask
-到 network address，IPv4/port 在 snapshot 中保存为 host byte order 数值。
-
-thin binding 用 `dp_flow_rules_alloc/set` 与 `dp_route_rules_alloc/set` 填写临时 C array，
-Go 不计算 C array 元素地址。`dp_configure_rules()` 在返回前把全部规则复制到 C-owned
-资源，临时 array 随即释放；C 不长期保存 Go pointer。运行开始后没有 Add、Delete、
-Replace 或 reload API，native 层也拒绝重复配置和 Run 后配置。
-
-EAL argv 继续由 C helper 分配和设置。EAL 可能重排 argv，因此原始 C string 地址保留
-到 cleanup；`Info`、`Stats` 都返回 Go-owned snapshot。
-
-## 5. Exact flow、IPv4 LPM 与 action store
-
-exact flow key 固定为 16 bytes：
+Goal 006-007 将依赖资源收敛为：
 
 ~~~c
-struct dp_flow_key {
-    uint32_t src_ipv4;
-    uint32_t dst_ipv4;
-    uint16_t src_port;
-    uint16_t dst_port;
-    uint8_t l4_proto;
-    uint8_t reserved[3];
+struct dp_rule_snapshot {
+    struct rte_hash *flow_table;
+    struct rte_lpm *route_table;
+    struct dp_rule_action *actions;
+    uint32_t action_count;
+    uint64_t generation;
 };
 ~~~
 
-`dp_flow_key_from_meta()` 先清零整个 key，再填写 Goal 003 host-order metadata，保证
-reserved/padding 不携带未初始化数据。`rte_hash` 的 data pointer 直接引用统一的
-immutable action store。`rte_lpm` 以 `meta.dst_ipv4` 查询，next-hop 值保存同一 action
-store 的 index。lookup 顺序固定为：
+`dp_state` 只发布一个 `_Atomic(struct dp_rule_snapshot *) active_rules`。flow hash 的
+data pointer 指向同一 snapshot 的 action store；LPM next-hop index 也只在该 snapshot
+的 action store 内解释。hash、LPM、action 与 snapshot object 必须整代构建、整代
+发布、整代回收。
+
+每代 DPDK object 使用短且唯一的 `dfr_f_<generation>`、`dfr_r_<generation>` 名称，
+避免新旧两代在 grace period 内共存时发生 name collision。builder 的所有 allocation
+都使用 EAL init 阶段保存的 `dp.info.socket_id`；publish 可以从普通 Go goroutine
+进入，不能使用该调用线程的 `rte_socket_id()` 决定 NUMA socket。
+
+## 3. 初始配置与动态 publish
+
+初始 JSON 仍在 EAL/port 启动前完成严格解析和校验。`dp_configure_rules()` 创建 QSBR、
+完整构建 generation 1，然后以 release store 发布。任何 partial build failure 都立即
+释放新建资源，不修改 active pointer 或 generation。
+
+动态 writer 的顺序固定为：
 
 ~~~text
-rte_hash exact TCP/UDP 5-tuple
--> miss: rte_lpm IPv4 longest-prefix
--> miss: default DROP
+Go clone + mutation + validate
+-> Go rulesMu 串行化
+-> cgo 临时 rule arrays
+-> C writer_lock 防御性串行化
+-> build generation N+1 完整 snapshot
+-> atomic_exchange(active_rules, new, memory_order_acq_rel)
+-> rte_rcu_qsbr_start()
+-> rte_rcu_qsbr_check(..., wait=true)
+-> free old hash/LPM/actions/snapshot
+-> 更新 Go currentRules
 ~~~
 
-flow hit 后立即返回，禁止继续 route lookup。route 同时存在 `/8` 与 `/24` 时，
-`rte_lpm` 选择 `/24`。当前容量为 1024 flows、1024 routes；没有 wildcard、range、
-ACL、bulk lookup、锁、热路径 allocation 或动态 writer。
+`rte_rcu_qsbr_start()` 刻意位于 pointer exchange 之后。这样 publish 之前发生的
+quiescent 不能错误地证明旧代已经无人引用。同步 publish 可以阻塞 control writer，
+packet worker 不等待 writer。
 
-统一 action 只支持 DROP、FORWARD、REWRITE。rewrite mask 只允许 src/dst IPv4 和
-src/dst TCP/UDP port；未设置字段保持不变，不修改 MAC、TTL、VLAN 或 payload。任何
-rewrite 都先把 IPv4 与 L4 checksum 字段清零，再调用 `rte_ipv4_cksum()` 和
-`rte_ipv4_udptcp_cksum()` 软件重算，不依赖 TX checksum offload。
+新 snapshot build 失败时，C active generation 与 Go `currentRules` 均保持不变。
+atomic exchange 一旦成功，新代已经对 reader 可见；正常 grace-period 路径没有回滚
+分支。`rules_reclaimed` 只在旧 snapshot 的全部资源真实 free 后增加。
 
-## 6. Parser、worker stats 与 mbuf ownership
+## 4. QSBR read side
 
-`dp_parse_packet()` 仍只接受 single-segment mbuf，以 segment `data_len` 为连续边界；
-multi-segment 返回 unsupported。metadata 的 EtherType、IPv4 地址和 TCP/UDP port
-全部为 host byte order，IHL、TCP data offset 和 L4 offset 由 packet 字段计算。
-parser 不修改或 free mbuf。
-
-每个 burst 的 ownership 转移为：
+当前 worker 使用 reader ID 0，生命周期为：
 
 ~~~text
-rte_eth_rx_burst 返回 [0,n)       application owns
-parse unsupported/malformed       worker 立即 free
-lookup miss / action DROP         worker 立即 free
-FORWARD / REWRITE                 原地压缩到 [0,tx_count)
-rte_eth_tx_burst 接受 [0,sent)    ownership 转给 TX PMD
-TX 未接受 [sent,tx_count)         application 立即 free
+Run
+-> rte_rcu_qsbr_thread_register(0)
+-> rte_rcu_qsbr_thread_online(0)
+-> loop
+   -> rte_eth_rx_burst()
+   -> atomic_load_explicit(active_rules, memory_order_acquire) 一次
+   -> 整个 burst 使用同一个 snapshot
+   -> parse / lookup / action / TX ownership 完成
+   -> rte_rcu_qsbr_quiescent(0)
+-> rte_rcu_qsbr_thread_offline(0)
+-> rte_rcu_qsbr_thread_unregister(0)
 ~~~
 
-仍采用一次 TX burst、zero-retry policy。最终维持五条守恒：
+`rte_eth_rx_burst()` 返回 0 时仍然立即报告 quiescent。否则 idle dataplane 的 writer
+可能永远等不到 grace period。非空 burst 的 quiescent 位于 lookup/action 与 TX burst
+之后；到达该点时，本 burst 不再解引用 snapshot，且全部 mbuf 已经 free 或转移给 PMD。
+
+## 5. Go 动态规则管理
+
+`Runtime` 保存深拷贝的 Go-owned `RuleSnapshot` 和当前 generation，并提供：
+
+~~~go
+ReplaceRules(snapshot RuleSnapshot) error
+AddFlow(rule FlowRule) error
+DeleteFlow(key FlowKey) error
+AddRoute(rule RouteRule) error
+DeleteRoute(key RouteKey) error
+RulesGeneration() uint64
+~~~
+
+每次操作在 `rulesMu` 内 clone 当前 snapshot、执行 mutation、复用既有严格校验、调用
+`native.PublishRules`，成功后才替换 Go 当前值。duplicate Add、missing Delete、非法
+Replace 都返回错误。传入 slice 会先复制，caller 后续修改不会改变 Runtime 状态。
+
+Go mutex 提供业务级 single writer 和 current snapshot 一致性；C `writer_lock` 防止
+native API 被其他 caller 误用。Run 返回后，owner 先在同一把 Go mutex 下关闭动态
+发布入口，再执行 Teardown，避免 publisher 与资源释放并发。
+
+## 6. API threading contract
+
+跨边界规则为：
+
+- `dp_dataplane_request_stop()`：允许跨线程，只写 C11 atomic stop flag；
+- `dp_publish_rules()`：允许跨线程，C 边界内部保证 single writer；
+- packet worker：只做 atomic acquire load 和 QSBR read-side 操作；
+- 其他 lifecycle API：仍由锁定 OS thread 的 owner goroutine 串行调用。
+
+cgo 通过命名 C helper 分配、填写和释放 rule arrays，不在 Go 做 C array pointer
+arithmetic。C builder 在调用返回前完成复制，因此不长期借用 Go pointer 或临时 C array。
+
+## 7. Lookup、action 与 mbuf ownership
+
+exact flow 仍使用固定 16-byte host-order TCP/UDP 5-tuple key，并在构造时整体清零。
+route 仍以 host-order destination IPv4 查询 `rte_lpm`。优先级保持：
+
+~~~text
+exact flow hit
+-> flow miss: longest-prefix route
+-> route miss: default DROP
+~~~
+
+DROP、FORWARD、REWRITE、rewrite mask、IPv4/TCP/UDP software checksum 与 Goal 004-005
+语义保持不变。每个 burst 的 mbuf ownership 为：
+
+~~~text
+RX 返回 [0,n)                     application owns
+parser/lookup/action DROP          worker free
+FORWARD / successful REWRITE       原地压缩到 [0,tx_count)
+TX 接受 [0,sent)                   PMD owns
+TX 未接受 [sent,tx_count)          application 立即 free，zero retry
+~~~
+
+packet stats 继续满足五条守恒：
 
 ~~~text
 rx = parse_ok + parse_unsupported + parse_malformed
@@ -158,43 +170,48 @@ action_forward + action_rewrite = tx_accepted + tx_unsent
 drop = parse_unsupported + parse_malformed + action_drop + tx_unsent
 ~~~
 
-production worker、lookup/action integration test 和 partial-return test 共用同一
-ownership helper。hot loop 没有逐包日志、heap allocation、Go callback 或 lock。
+## 8. Teardown 与 cleanup guard
 
-worker 返回后 Teardown 先释放 hash/LPM/action store，再关闭两个 ethdev。port close
-后验证 mempool in-use 为 0 才释放 pool。此顺序保证 worker 不再读取静态规则，也避免
-PMD 仍持有 mbuf 时提前释放 pool。
+worker offline/unregister 并返回后，Teardown 在 writer lock 下 detach current snapshot，
+释放当前 hash/LPM/action/snapshot，再释放 QSBR，随后关闭 port 并在 pool in-use 为 0 时
+释放 mempool。最终 stats 记录 `snapshot_freed` 与 `qsbr_freed`。
 
-## 7. TAP 端到端验证
+`dp_runtime_cleanup()` 对以下任一状态返回 `EBUSY`：
 
-`scripts/verify_tap_forwarding.py` 为每次运行生成临时 rules JSON、唯一 TAP 名和
-ifindex ownership 记录。它选择允许的 CPU 映射为 logical lcore 0，以 `--no-pci
---no-huge` 启动，并注入：
+- worker 仍运行；
+- port 或 mempool 仍存活；
+- `active_rules != NULL`；
+- QSBR 仍存活；
+- writer/update 正在进行；
+- rules lifecycle 尚未 teardown。
 
-1. exact flow DROP，同时目标 `/24` route 是 FORWARD；
-2. exact flow REWRITE，修改 dst IPv4 与 dst UDP port；
-3. flow miss 后 `/24` route FORWARD；
-4. flow/route miss 后 default DROP；
-5. Goal 003 IHL=4 malformed IPv4。
+Go owner 仍只有在 Teardown 成功后才进入 EAL cleanup；Teardown 失败时返回错误，让进程
+退出兜底。
 
-TX TAP 必须看不到三个 drop marker；FORWARD frame 必须逐字节不变；REWRITE frame
-必须保持 payload，并通过 IPv4/UDP checksum 验证。脚本不把 TAP background packet
-计数写死，而是检查 deterministic case 的最低命中数和全部五条 stats 守恒。
+## 9. Runtime E2E 与确定性测试
 
-停止后还要求两个 port close、pool in-use=0、pool/hash/LPM/action store 全部 free、
-EAL cleanup 成功，并且不遗留 router process、TAP、rules JSON 或临时目录。失败路径
-同样先 graceful stop，只按已记录 ifindex 清理自身接口。脚本不配置主机地址、route、
-firewall、管理网卡、VFIO 或 HugePage。
+TAP verifier 使用同一个 PID、EAL、两个 port 和 mempool 验证同一个 UDP flow：
 
-本机 Go runtime 占用 realtime signals 时，TAP PMD 会退回非阻塞 polling；functional
-结果不受影响，但该软件实验不能解释为性能数据。
+1. generation 1 exact flow DROP，且同时匹配 `/24` FORWARD route；
+2. SIGHUP 发布 generation 2，改为 REWRITE destination IPv4/port，并验证两个 checksum；
+3. 写入非法 JSON 后 SIGHUP，旧 generation 2 行为保持；
+4. SIGHUP 发布 generation 3，删除 exact flow，同一原始 frame 经 route 原样 FORWARD。
 
-## 8. 软件仿真边界与下一步
+日志必须只有一次 EAL init 和一次 port setup；最终要求 generation=3、publish_success=3、
+reclaimed=2，并继续验证 malformed、lookup miss、packet stats 守恒和完整 cleanup。
 
-当前证据覆盖 Go/cgo/C ownership、EAL lifecycle、TAP PMD、Ethernet/IPv4/TCP/UDP
-parser、exact flow、IPv4 LPM、DROP/FORWARD/REWRITE、软件 checksum、单 queue RTC
-和完整 cleanup。它不能证明真实 NIC DMA、hardware RSS、cross-NUMA cost、descriptor
-行为、line-rate、latency 或 throughput。
+native 确定性测试让 reader online 后启动异步 publisher。测试先观察到 generation 2
+active pointer，同时确认 publisher 尚未返回且旧代未回收；reader quiescent 后 writer
+才完成并令 reclaimed 增加。测试再让一个只报告 RX=0 quiescent 的 idle reader 推进
+同步 publish，随后验证非法 build 保留旧 generation，并在 reader offline 状态连续
+publish 50 次；最终 generation 53、旧代累计回收 52 次，current snapshot 与 QSBR
+在 teardown 释放。
 
-runtime rule update、RCU/QSBR、RSS、multi-queue、multi-lcore、API/Web、NAT 与
-conntrack 都仍未实现。Goal 004-005 完成后停止开发，等待 ChatGPT 验收。
+## 10. 软件仿真边界与下一步
+
+当前证据覆盖 Go/cgo/C ownership、运行期 whole-snapshot replacement、C11 atomic、真实
+DPDK QSBR、TAP PMD、parser、lookup/action/checksum、single queue RTC 和 cleanup。
+它不能证明真实 NIC DMA、hardware RSS、cross-NUMA cost、line-rate、latency 或 throughput。
+
+RSS、multi-queue、multi-lcore、per-lcore stats 与 benchmark 仍未实现，留给 Goal 008-009。
+REST/gRPC/Web、NAT、conntrack、ARP 和 IPv6 不属于本 Goal。

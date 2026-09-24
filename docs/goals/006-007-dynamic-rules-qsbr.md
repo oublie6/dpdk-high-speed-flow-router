@@ -1,7 +1,7 @@
 # Goal 006-007：Dynamic Rule Publication + RCU/QSBR
 
 日期：2026-09-25  
-状态：⬜ 待 Codex 实现
+状态：✅ Codex 已完成，待 ChatGPT 验收
 
 ## 1. 目标
 
@@ -430,3 +430,149 @@ dataplane: add dynamic rules with QSBR
 ~~~
 
 最终报告：commit SHA、snapshot 结构、atomic publish 顺序、QSBR reader/quiescent 设计、Go CRUD API、writer serialization、runtime E2E、reclamation evidence、50+ publish stress、failure semantics、旧 Goal 回归与未解决问题。
+
+---
+
+## 20. Codex 实现记录（2026-09-24）
+
+### 20.1 Snapshot 与 atomic publish
+
+native 已将原来的分散全局 `flow_table`、`route_table`、`actions` 收敛为：
+
+~~~c
+struct dp_rule_snapshot {
+    struct rte_hash *flow_table;
+    struct rte_lpm *route_table;
+    struct dp_rule_action *actions;
+    uint32_t action_count;
+    uint64_t generation;
+};
+~~~
+
+`dp_state.active_rules` 是 C11 atomic pointer。初始 generation 1 使用 release store；动态
+publish 在 C `writer_lock` 内完整构建 N+1 后使用 `memory_order_acq_rel` exchange。worker
+每个 RX burst 使用 `memory_order_acquire` load 一次，整个 burst 只使用该 pointer。
+
+exchange 完成后才调用 `rte_rcu_qsbr_start()` 和 blocking `rte_rcu_qsbr_check()`，随后
+整体释放旧代 hash、LPM、action store 与 snapshot。新旧 generation 使用
+`dfr_f_<generation>`、`dfr_r_<generation>` 唯一短名称。所有 builder allocation 使用
+EAL init 保存的 `dp.info.socket_id`，不依赖 publish goroutine 所在线程。
+
+### 20.2 QSBR reader lifecycle
+
+QSBR 按 `RTE_MAX_LCORE` reader capacity 分配，当前 worker 使用 reader ID 0：
+
+~~~text
+register -> online -> worker loop -> offline -> unregister
+~~~
+
+非空 burst 在 parse/lookup/action/TX ownership 全部结束后报告 quiescent；RX=0 的 idle
+分支也报告 quiescent。packet hot path 没有 mutex、refcount、allocation 或 cgo crossing。
+
+### 20.3 Go Runtime CRUD 与 reload
+
+`Runtime` 实现 `ReplaceRules`、`AddFlow`、`DeleteFlow`、`AddRoute`、`DeleteRoute` 和
+`RulesGeneration`。`FlowKey`/`RouteKey` 与携带 action 的 rule 明确分离。每次 mutation
+都在 Go `rulesMu` 内 clone、修改、校验、调用 native publish，成功后才更新 Go-owned
+current snapshot。duplicate Add、missing Delete、invalid Replace 与 native publish failure
+均保持旧 Go snapshot。传入 slice 会深拷贝；两个并发 writer 由 mutex 串行化。
+
+`dp_publish_rules()` 是除 stop 外新增的 cross-thread API，并在 C 边界再次用 mutex
+防御性串行化。其他 lifecycle API 仍只允许 owner OS thread。Run 返回后 owner 先关闭
+Go publish 入口，再执行 Teardown。
+
+CLI 的 `--rules-file` 同时提供 generation 1 与显式 SIGHUP reload。reload 的 JSON 读取、
+校验或 publish 失败只输出 control-plane error；worker 和旧 packet behavior 保持运行。
+
+### 20.4 Failure、stats 与 cleanup
+
+builder failure 会释放 partial new snapshot，不交换 active pointer，不增加 generation。
+动态统计新增：
+
+~~~text
+rules_generation
+rules_publish_success
+rules_publish_failed
+rules_reclaimed
+~~~
+
+`rules_reclaimed` 只在旧 native generation 全部 free 后增加。Teardown 在 worker
+offline/unregister 后 detach 并释放 current snapshot，再释放 QSBR。cleanup guard 已覆盖
+active snapshot、QSBR 与 writer/update in progress；最终输出 `snapshot_freed` 和
+`qsbr_freed`。
+
+### 20.5 Deterministic native 与 Go 测试证据
+
+真实 DPDK native test 完成以下顺序：reader 0 register/online，普通 pthread writer 构建
+并交换 generation 2；测试观察到新代 lookup 已可见，同时 publisher 尚未返回且
+`rules_reclaimed` 未增加；reader quiescent 后 writer 才返回并回收 generation 1。之后
+非法 protocol build 返回 `EINVAL`，active pointer、generation 与 lookup action 都保持；
+随后用只执行 RX=0 quiescent 的 idle reader 线程完成一次同步 publish；reader
+offline/unregister 后再连续 publish 50 次，最终：
+
+~~~text
+generation=53
+publish_success=53
+publish_failed=1
+reclaimed=52
+current snapshot freed=true
+QSBR freed=true
+~~~
+
+Go deterministic tests覆盖 valid/invalid Replace、flow/route Add/Delete、duplicate/missing、
+caller slice ownership、native publish failure rollback 和两个并发 writer 串行化。
+
+### 20.6 同一 PID runtime E2E
+
+TAP verifier 的一次真实运行输出：
+
+~~~text
+same PID generation 1 DROP -> generation 2 REWRITE + checksum -> generation 3 route FORWARD unchanged PASS; invalid reload kept generation 2 behavior PASS
+stats: rx=9 parse_ok=5 parse_unsupported=3 parse_malformed=1 flow_hit=3 route_hit=1 lookup_miss=1 action_drop=2 action_forward=1 action_rewrite=2 tx_accepted=3 tx_unsent=0 drop=6
+rules: generation=3 publish_success=3 publish_failed=0 reclaimed=2
+teardown: ports_closed=2 pool_in_use=0 pool_freed=true flow_table_freed=true route_table_freed=true action_store_freed=true snapshot_freed=true qsbr_freed=true
+EAL cleanup succeeded
+PASS: Goal006-007 same-PID dynamic snapshot/QSBR publication, old-generation reclaim, regressions, graceful cleanup, no test interfaces/process/temp files remain
+~~~
+
+generation 1 DROP 与 `/24` FORWARD 同时匹配，证明 flow precedence；generation 2 对同一
+原始 frame 改写 destination IPv4/UDP port，并验证 IPv4/UDP checksum；一次非法 JSON
+reload 后仍保持 generation 2 rewrite；generation 3 删除 exact flow，同一 frame 经 route
+逐字节不变地 FORWARD。日志中 EAL init 与 port setup 都只有一次，publish 前存在 idle
+窗口，因此同时覆盖 RX=0 quiescent。
+
+### 20.7 实际验收命令
+
+以下命令均实际执行并退出 0：
+
+~~~bash
+git diff --check
+make build
+make test
+make vet
+
+bash -n scripts/install_dpdk.sh
+bash -n scripts/check_env.sh
+bash -n scripts/verify_tap_forwarding.sh
+python3 -m py_compile scripts/verify_tap_forwarding.py
+
+./scripts/check_env.sh
+./scripts/verify_tap_forwarding.sh
+
+EAL_CPU=$(awk '/Cpus_allowed_list/ {split($2, a, /[-,]/); print a[1]}' /proc/self/status)
+FLOW_ROUTER_TEST_CPU="$EAL_CPU" make test
+FLOW_ROUTER_TEST_CPU="$EAL_CPU" \
+  CGO_CFLAGS_ALLOW='^(-include|rte_config\.h|-mrtm)$' \
+  go test -count=1 -v ./control/dataplane ./dataplane/native
+
+gcc -std=c11 -Wall -Wextra -Werror $(pkg-config --cflags libdpdk) \
+  -Idataplane/native -fsyntax-only \
+  dataplane/native/dp_lookup.c dataplane/native/dp_worker.c \
+  dataplane/native/dp_runtime.c dataplane/native/dp_port.c \
+  dataplane/native/dp_lookup_action_test.c
+~~~
+
+旧 Goal 回归继续覆盖 EAL lifecycle、partial TX ownership、Teardown failure、cleanup
+guard、20 个 parser fixture、malformed drop、exact hash、LPM longest-prefix、flow precedence、
+DROP/FORWARD/REWRITE、TCP/UDP checksum 与 packet stats 守恒。当前没有进入 RSS、
+multi-queue、multi-lcore、per-lcore stats 或 benchmark，也没有已知的本 Goal 未解决问题。

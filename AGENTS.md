@@ -508,7 +508,7 @@ static rte_hash exact-flow
 + checksum
 + startup JSON snapshot
 
-Goal 006-007 ⬜
+Goal 006-007 ✅（Codex 已完成，待 ChatGPT 验收）
 dynamic Go rule management
 + immutable native rule snapshots
 + atomic publish
@@ -521,7 +521,7 @@ dynamic Go rule management
 
 ## 17. 当前执行任务
 
-当前只执行：
+当前已完成并停止开发，等待验收：
 
 `docs/goals/006-007-dynamic-rules-qsbr.md`
 
@@ -538,4 +538,5 @@ dynamic Go rule management
 
 禁止自行进入 RSS、multi-queue、multi-lcore、benchmark、REST/gRPC/Web。
 
-Codex 完成 Goal 006-007 后必须停止，等待 ChatGPT 验收。
+Codex 已完成 Goal 006-007，不进入 RSS、multi-queue、multi-lcore 或 benchmark，
+等待 ChatGPT 验收。

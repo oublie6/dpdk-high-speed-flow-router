@@ -11,7 +11,12 @@
 #if RTE_VER_YEAR != 25 || RTE_VER_MONTH != 11 || RTE_VER_MINOR != 3
 #error "This project requires DPDK 25.11.3 headers"
 #endif
-struct dp_state dp = {.stop = ATOMIC_VAR_INIT(false)};
+struct dp_state dp = {
+    .stop = ATOMIC_VAR_INIT(false),
+    .active_rules = ATOMIC_VAR_INIT(NULL),
+    .writer_lock = PTHREAD_MUTEX_INITIALIZER,
+    .writer_active = ATOMIC_VAR_INIT(false),
+};
 
 int dp_runtime_init(int argc, char **argv)
 {
@@ -30,6 +35,10 @@ int dp_runtime_init(int argc, char **argv)
     dp.info.main_lcore = rte_get_main_lcore();
     dp.info.lcore_count = rte_lcore_count();
     dp.info.version = rte_version();
+    /* 后续 publish 可能来自普通 Go goroutine，builder 必须使用这里保存的
+     * EAL socket，而不能依赖调用线程的 rte_socket_id()。
+     */
+    dp.info.socket_id = rte_socket_id();
     return 0;
 }
 
@@ -59,8 +68,11 @@ int dp_runtime_cleanup(void)
         return -ENODEV;
     /* teardown 未完整结束时，EAL 仍可能被 worker、ethdev 或 mempool 引用。 */
     if (dp.running || dp.pool || dp.owned[0] || dp.owned[1] ||
-        dp.started[0] || dp.started[1] || dp.flow_table || dp.route_table ||
-        dp.actions || dp.rules_configured)
+        dp.started[0] || dp.started[1] ||
+        atomic_load_explicit(&dp.active_rules, memory_order_acquire) ||
+        dp.rules_qsbr ||
+        atomic_load_explicit(&dp.writer_active, memory_order_acquire) ||
+        dp.rules_configured)
         return -EBUSY;
     /* teardown 失败也会报告错误并终止进程；不尝试第二次 EAL 生命周期。 */
     dp.initialized = false;
@@ -74,16 +86,18 @@ int dp_test_runtime_cleanup_guard(int resource)
     bool owned = dp.owned[0];
     bool rules_configured = dp.rules_configured;
     struct rte_mempool *pool = dp.pool;
-    struct rte_hash *flow_table = dp.flow_table;
-    struct rte_lpm *route_table = dp.route_table;
-    struct dp_rule_action *actions = dp.actions;
+    struct dp_rule_snapshot *active_rules =
+        atomic_load_explicit(&dp.active_rules, memory_order_relaxed);
+    struct rte_rcu_qsbr *rules_qsbr = dp.rules_qsbr;
+    bool writer_active =
+        atomic_load_explicit(&dp.writer_active, memory_order_relaxed);
     int ret;
 
     if (resource != DP_TEST_LIVE_WORKER && resource != DP_TEST_LIVE_PORT &&
         resource != DP_TEST_LIVE_MEMPOOL &&
-        resource != DP_TEST_LIVE_FLOW_TABLE &&
-        resource != DP_TEST_LIVE_ROUTE_TABLE &&
-        resource != DP_TEST_LIVE_ACTION_STORE)
+        resource != DP_TEST_LIVE_ACTIVE_RULES &&
+        resource != DP_TEST_LIVE_QSBR &&
+        resource != DP_TEST_LIVE_WRITER)
         return -EINVAL;
 
     dp.initialized = true;
@@ -98,14 +112,17 @@ int dp_test_runtime_cleanup_guard(int resource)
         /* cleanup guard 只比较 NULL，不会解引用这个测试哨兵。 */
         dp.pool = (struct rte_mempool *)1;
         break;
-    case DP_TEST_LIVE_FLOW_TABLE:
-        dp.flow_table = (struct rte_hash *)1;
+    case DP_TEST_LIVE_ACTIVE_RULES:
+        atomic_store_explicit(&dp.active_rules,
+                              (struct dp_rule_snapshot *)1,
+                              memory_order_relaxed);
         break;
-    case DP_TEST_LIVE_ROUTE_TABLE:
-        dp.route_table = (struct rte_lpm *)1;
+    case DP_TEST_LIVE_QSBR:
+        dp.rules_qsbr = (struct rte_rcu_qsbr *)1;
         break;
-    case DP_TEST_LIVE_ACTION_STORE:
-        dp.actions = (struct dp_rule_action *)1;
+    case DP_TEST_LIVE_WRITER:
+        atomic_store_explicit(&dp.writer_active, true,
+                              memory_order_relaxed);
         break;
     }
 
@@ -115,8 +132,10 @@ int dp_test_runtime_cleanup_guard(int resource)
     dp.owned[0] = owned;
     dp.pool = pool;
     dp.rules_configured = rules_configured;
-    dp.flow_table = flow_table;
-    dp.route_table = route_table;
-    dp.actions = actions;
+    atomic_store_explicit(&dp.active_rules, active_rules,
+                          memory_order_relaxed);
+    dp.rules_qsbr = rules_qsbr;
+    atomic_store_explicit(&dp.writer_active, writer_active,
+                          memory_order_relaxed);
     return ret;
 }

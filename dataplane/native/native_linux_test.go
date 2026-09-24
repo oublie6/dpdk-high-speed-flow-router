@@ -93,9 +93,9 @@ func TestRuntimeCleanupRejectsLiveResources(t *testing.T) {
 		{name: "worker", resource: testLiveWorker},
 		{name: "port", resource: testLivePort},
 		{name: "mempool", resource: testLiveMempool},
-		{name: "flow table", resource: testLiveFlowTable},
-		{name: "route table", resource: testLiveRouteTable},
-		{name: "action store", resource: testLiveActionStore},
+		{name: "active rule snapshot", resource: testLiveActiveRules},
+		{name: "QSBR", resource: testLiveQSBR},
+		{name: "writer", resource: testLiveWriter},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,4 +171,39 @@ func TestStaticLookupAndActions(t *testing.T) {
 		"lookup miss PASS; DROP ownership PASS; FORWARD unchanged PASS; " +
 		"UDP REWRITE + checksum PASS; TCP REWRITE + checksum PASS; " +
 		"lookup/action resources freed PASS")
+}
+
+// 该测试使用真实 rte_hash、rte_lpm allocator 与 DPDK QSBR，并让 publish
+// 在普通 pthread 上执行，覆盖非 EAL control goroutine 的调用条件。
+func TestDynamicRulesQSBR(t *testing.T) {
+	cpu := os.Getenv("FLOW_ROUTER_TEST_CPU")
+	if cpu == "" {
+		t.Skip("set FLOW_ROUTER_TEST_CPU to run the real QSBR test")
+	}
+	if os.Getenv("FLOW_ROUTER_QSBR_TEST_CHILD") == "1" {
+		runtime.LockOSThread()
+		args := []string{"--lcores=0@" + cpu, "--no-huge", "--no-pci",
+			"--no-shconf", "--no-telemetry", "-m", "256"}
+		if err := Init(args); err != nil {
+			t.Fatal(err)
+		}
+		if err := testDynamicRulesQSBR(); err != nil {
+			t.Fatal(err)
+		}
+		if err := Cleanup(); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDynamicRulesQSBR$", "-test.v")
+	cmd.Env = append(os.Environ(), "FLOW_ROUTER_QSBR_TEST_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+	t.Log("reader lifecycle PASS; publish visibility PASS; pre-quiescent retain PASS; " +
+		"post-quiescent reclaim PASS; idle reader publish PASS; build rollback PASS; " +
+		"50 publishes leak-free PASS; " +
+		"snapshot/QSBR teardown PASS")
 }

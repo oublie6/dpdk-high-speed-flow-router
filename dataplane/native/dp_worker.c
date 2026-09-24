@@ -17,7 +17,8 @@ void dp_dataplane_request_stop(void)
 }
 
 struct rte_mbuf *
-dp_process_packet(struct rte_mbuf *mbuf, struct dp_stats *stats)
+dp_process_packet(struct rte_mbuf *mbuf, struct dp_stats *stats,
+                  const struct dp_rule_snapshot *snapshot)
 {
     struct dp_packet_meta meta;
     const struct dp_rule_action *action;
@@ -36,7 +37,7 @@ dp_process_packet(struct rte_mbuf *mbuf, struct dp_stats *stats)
     }
     stats->parse_ok++;
 
-    lookup_result = dp_lookup_packet(&meta, &action);
+    lookup_result = dp_lookup_packet(&meta, snapshot, &action);
     if (lookup_result == DP_LOOKUP_FLOW_HIT)
         stats->flow_hit++;
     else if (lookup_result == DP_LOOKUP_ROUTE_HIT)
@@ -76,20 +77,32 @@ dp_process_packet(struct rte_mbuf *mbuf, struct dp_stats *stats)
 int dp_dataplane_run(void)
 {
     struct rte_mbuf *pkts[DP_BURST_SIZE];
+    int ret;
     if (!dp.ready)
         return -ENODEV;
     if (dp.ran)
         return -EALREADY;
-    dp.ran = dp.running = true;
+    dp.ran = true;
+    ret = dp_rules_reader_register();
+    if (ret < 0)
+        return ret;
+    dp.running = true;
     while (!atomic_load_explicit(&dp.stop, memory_order_relaxed)) {
         uint16_t n = rte_eth_rx_burst(dp.ports[0], 0, pkts, DP_BURST_SIZE);
         uint16_t tx_count = 0;
-        if (n == 0)
+        struct dp_rule_snapshot *snapshot = dp_rules_active_load();
+        if (n == 0) {
+            /* idle 也是完整的 read-side 周期。缺少这个 quiescent 会让低流量
+             * 数据面的同步 publish 永远等待旧 generation。
+             */
+            dp_rules_reader_quiescent();
             continue;
+        }
 
         dp.stats.rx += n;
         for (uint16_t i = 0; i < n; i++) {
-            struct rte_mbuf *candidate = dp_process_packet(pkts[i], &dp.stats);
+            struct rte_mbuf *candidate =
+                dp_process_packet(pkts[i], &dp.stats, snapshot);
             if (candidate) {
                 /* 复用 RX 数组原地压缩，不为每个 burst 分配第二个 pointer array。 */
                 pkts[tx_count++] = candidate;
@@ -100,8 +113,13 @@ int dp_dataplane_run(void)
             uint16_t sent = rte_eth_tx_burst(dp.ports[1], 0, pkts, tx_count);
             dp_complete_tx(pkts, tx_count, sent, &dp.stats);
         }
+        /* 本 burst 的全部 lookup/action 和 TX ownership 都已结束，之后不再
+         * 解引用 snapshot，因此这里是安全且明确的 quiescent point。
+         */
+        dp_rules_reader_quiescent();
     }
     /* 每次 burst 都已转移或释放全部 mbuf；返回时没有 pending packet ownership。 */
+    dp_rules_reader_unregister();
     dp.running = false;
     return 0;
 }

@@ -31,6 +31,11 @@ type Runtime struct {
 	info          Info
 	stats         Stats
 	startErr, err error
+	rulesMu       sync.Mutex
+	currentRules  RuleSnapshot
+	generation    uint64
+	rulesOpen     bool
+	publishRules  func(native.RuleSnapshot) (uint64, error)
 }
 
 func validate(cfg Config) error {
@@ -72,7 +77,8 @@ func Start(cfg Config) (*Runtime, error) {
 	// caller 返回后可以修改原始 slice；manager 拥有自己的参数快照。
 	cfg.EALArgs = append([]string(nil), cfg.EALArgs...)
 	cfg.Rules = cloneRules(cfg.Rules)
-	r := &Runtime{ready: make(chan struct{}), done: make(chan struct{})}
+	r := &Runtime{ready: make(chan struct{}), done: make(chan struct{}),
+		currentRules: cloneRules(cfg.Rules), publishRules: native.PublishRules}
 	go r.owner(cfg)
 	return r, nil
 }
@@ -138,14 +144,24 @@ func (r *Runtime) owner(cfg Config) {
 			r.info, err = native.GetInfo()
 		}
 	}
+	if err == nil && !cfg.Probe {
+		r.rulesMu.Lock()
+		r.generation = 1
+		r.rulesOpen = true
+		r.rulesMu.Unlock()
+	}
 	r.startErr = err
 	close(r.ready) // channel close 发布初始化结果，Ready 之后读取不与 owner 竞争。
 	if err == nil && !cfg.Probe {
 		err = native.Run()
 	}
 	if initialized {
-		// Run 返回就是 worker 已停止；此后仍在同一个 owner thread 按依赖顺序清理。
+		// 与动态 writer 使用同一把 Go mutex：Run 返回后先关闭发布入口，再在
+		// owner thread 清理，避免 Teardown 与尚未结束的 PublishRules 并发。
+		r.rulesMu.Lock()
+		r.rulesOpen = false
 		err = r.finishLifecycle(nativeCleanupAPI{}, err)
+		r.rulesMu.Unlock()
 	}
 	r.err = err
 	close(r.done)

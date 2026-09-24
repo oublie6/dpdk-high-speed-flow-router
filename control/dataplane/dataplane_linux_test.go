@@ -119,7 +119,8 @@ func TestSetupFailureFreesStaticRules(t *testing.T) {
 		if err == nil {
 			t.Fatal("setup failure was not retained by Wait")
 		}
-		if !stats.FlowTableFreed || !stats.ActionStoreFreed {
+		if !stats.FlowTableFreed || !stats.ActionStoreFreed ||
+			!stats.SnapshotFreed || !stats.QSBRFreed {
 			t.Fatalf("static resources were not freed after setup failure: %+v", stats)
 		}
 		return
