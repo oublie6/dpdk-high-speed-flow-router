@@ -1,4 +1,5 @@
 #include "dp_internal.h"
+#include "dp_lookup.h"
 #include <errno.h>
 #include <string.h>
 #include <rte_errno.h>
@@ -48,6 +49,8 @@ int dp_dataplane_setup(const char *rx_device, const char *tx_device)
         return -ENODEV;
     if (dp.pool || dp.ready)
         return -EALREADY;
+    if (!dp.rules_configured)
+        return -EINVAL;
     if (!rx_device || !tx_device || dp.info.lcore_count != 1)
         return -EINVAL;
     /* port id 是 EAL 的分配结果，不能把 vdev 顺序当成固定的 0/1。 */
@@ -92,6 +95,10 @@ int dp_dataplane_teardown(void)
     if (dp.running)
         return -EBUSY;
     dp.ready = false;
+    /* worker 已停止后，先撤销其只读 lookup/action snapshot。即使 port close
+     * 随后失败，这些资源也不再被任何执行路径引用。
+     */
+    dp_rules_teardown();
     for (unsigned int i = 0; i < 2; i++) {
         int ret;
         if (!dp.owned[i])

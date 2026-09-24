@@ -1,7 +1,7 @@
 # Goal 004-005：Static Lookup + DROP / FORWARD / REWRITE
 
 日期：2026-09-24  
-状态：⬜ 待 Codex 实现
+状态：✅ Codex 已完成，待 ChatGPT 验收
 
 ## 1. 背景
 
@@ -375,3 +375,146 @@ dataplane: add static lookup and packet actions
 ~~~
 
 最终报告：commit SHA、flow key、LPM 设计、precedence、action 结构、JSON static config、checksum 策略、lifecycle、unit tests、TAP E2E、Goal002/003 回归和未解决问题。
+---
+
+## 20. Codex 实现记录（2026-09-24）
+
+### 20.1 同步与范围
+
+实现前依次执行 `git status --short`、`git branch --show-current`、`git fetch origin`、
+`git pull --ff-only origin main`。工作区为空、分支为 `main`；远端从 `4c58e56`
+快进到 `5b31e58`，没有 divergence 或 conflict。同步后完整重读 AGENTS、README、
+architecture、Goal 003 和本 Goal。
+
+本次只加入 static lookup、action/rewrite、启动前 JSON、相关 stats/lifecycle/test。
+没有加入 runtime update、RCU/QSBR、bulk lookup、RSS、multi-queue、multi-lcore、
+benchmark、API/Web、NAT 或 conntrack。
+
+### 20.2 Go static JSON snapshot
+
+CLI 新增 `--rules-file <json>`。Go 使用 strict decoder，拒绝未知字段、第二个 JSON
+值、非 IPv4、非法 IPv4 CIDR、非 tcp/udp protocol、非法 action、空 rewrite、
+duplicate flow、mask 后重复 route 和超过 1024 flow/route capacity。CIDR 会规范化为
+network address；地址和端口按 host byte order 数值发布。当前没有实现 `/0` default
+route，`0.0.0.0/0` 在 Go 校验阶段明确拒绝；lookup miss 的唯一默认策略仍是 DROP。
+
+生命周期变为：
+
+~~~text
+Init -> GetInfo -> ConfigureRules -> Setup -> Run -> Teardown -> Cleanup
+~~~
+
+`Start()` 复制 caller 的 Go snapshot。binding 使用命名清晰的 C array alloc/set/free
+helper，不在 Go 中做 C pointer arithmetic。`dp_configure_rules()` 同步复制完成后，
+临时 C array 立即释放；运行期没有 Add/Delete/Replace/reload API，native 也拒绝重复
+配置、Setup/Run 期间配置和 Run 后配置。
+
+### 20.3 rte_hash、rte_lpm 与 action store
+
+最终 exact key 为固定 16 bytes：
+
+~~~c
+struct dp_flow_key {
+    uint32_t src_ipv4;
+    uint32_t dst_ipv4;
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint8_t l4_proto;
+    uint8_t reserved[3];
+};
+~~~
+
+`dp_flow_key_from_meta()` 先 `memset` 整个 key，再填写 Goal 003 metadata，reserved 和
+隐含 padding 都不会携带未初始化数据。flow table 使用 1024-entry `rte_hash`；data
+pointer 指向 C-owned immutable action store。route table 使用 1024-rule `rte_lpm`，
+以 `meta.dst_ipv4` 查询，并把 action store index 保存为 next-hop。测试同时加入
+`10.0.0.0/8` 与 `10.1.2.0/24`，`10.1.2.99` 实际选择 `/24`。
+
+lookup 固定为 exact flow -> flow miss 才查 LPM -> route miss default DROP。确定性测试
+让 exact flow DROP 与 `/24` route FORWARD 同时匹配，并验证结果为 flow DROP，证明
+flow hit 后没有继续 route lookup。
+
+统一 action store 使用 `DP_ACTION_DROP`、`DP_ACTION_FORWARD`、`DP_ACTION_REWRITE`。
+rewrite mask 只允许 src/dst IPv4 与 src/dst TCP/UDP port。action、hash、LPM 在 Run
+期间不修改，hot path 无 allocation、锁和逐包 cgo。
+
+### 20.4 Rewrite、checksum 与 ownership
+
+`dp_action.c` 按 parser 给出的 L2/L4 offset 原地修改设置了 mask 的字段；其他地址、
+端口、Ethernet header、TTL 和 payload 保持不变。每次 rewrite 都先清零 IPv4 与
+TCP/UDP checksum，再调用 `rte_ipv4_cksum()` 和 `rte_ipv4_udptcp_cksum()` 软件重算，
+不依赖 TX offload。
+
+worker 主路径为 parse -> exact flow -> route fallback -> action。DROP 和 default DROP
+立即 free；FORWARD 和成功 REWRITE 复用 RX pointer array 原地 compact，最后只做一次
+TX burst，继续使用既有 zero-retry partial-return helper。stats 新增 flow_hit、
+route_hit、lookup_miss、action_drop、action_forward、action_rewrite，并验证五条守恒。
+
+真实 EAL/mempool 测试覆盖 TCP/UDP exact hit、5-tuple 每个字段变化 miss、key padding
+稳定、`/8`、`/24`、longest-prefix、route miss、flow precedence、DROP 后 pool in-use
+立即归零、FORWARD 完整 bytes 不变、UDP 全字段 rewrite、TCP 单字段 rewrite、payload
+保持，以及 IPv4/TCP/UDP checksum。
+
+### 20.5 Teardown 与 cleanup guard
+
+worker 返回后 Teardown 先释放 flow hash、route LPM 和 action store，再 stop/close port，
+检查并释放 mempool。ConfigureRules 或 Setup 中途失败仍会走同一个 Teardown。
+最终 stats 输出 `flow_table_freed`、`route_table_freed`、`action_store_freed` 作为真实
+释放证据。
+
+`dp_runtime_cleanup()` 增加 flow table、route table、action store 和 rules state
+检查。package test 分别注入 live worker、port、mempool、flow table、route table、
+action store，全部必须返回 `EBUSY`。Teardown failure 仍由 Go owner 阻止 Cleanup。
+
+### 20.6 TAP Goal 004-005 证据
+
+验证器在自己的临时目录生成 rules JSON，注入五种 deterministic packet：flow
+DROP、flow REWRITE、route FORWARD、lookup miss 和 Goal003 malformed。一次真实运行：
+
+~~~text
+flow precedence DROP PASS; UDP REWRITE + checksum PASS; route /24 FORWARD unchanged PASS; lookup miss DROP PASS
+stats: rx=6 parse_ok=4 parse_unsupported=1 parse_malformed=1 flow_hit=2 route_hit=1 lookup_miss=1 action_drop=2 action_forward=1 action_rewrite=1 tx_accepted=2 tx_unsent=0 drop=4
+teardown: ports_closed=2 pool_in_use=0 pool_freed=true flow_table_freed=true route_table_freed=true action_store_freed=true
+EAL cleanup succeeded
+PASS: Goal004-005 exact flow/LPM/action/rewrite, stats conservation, graceful cleanup, no test interfaces/process/temp files remain
+~~~
+
+一个 unsupported packet 来自 TAP link-up background traffic。脚本不固定 raw RX 数量，
+只检查 deterministic marker、最低命中数和五条守恒。flow DROP 同时匹配 `/24`
+FORWARD 但没有出现在 TX；rewrite 修改 dst IPv4 + dst UDP port，payload 不变且两个
+checksum 正确；route FORWARD frame 完整不变；lookup miss 与 malformed 都未转发。
+
+### 20.7 实际验收命令
+
+以下命令均实际执行并退出 0：
+
+~~~bash
+git diff --check
+make build
+make test
+make vet
+
+bash -n scripts/install_dpdk.sh
+bash -n scripts/check_env.sh
+bash -n scripts/verify_tap_forwarding.sh
+python3 -m py_compile scripts/verify_tap_forwarding.py
+
+./scripts/check_env.sh
+./scripts/verify_tap_forwarding.sh
+
+EAL_CPU=$(awk '/Cpus_allowed_list/ {split($2, a, /[-,]/); print a[1]}' /proc/self/status)
+FLOW_ROUTER_TEST_CPU="$EAL_CPU" make test
+FLOW_ROUTER_TEST_CPU="$EAL_CPU" \
+  CGO_CFLAGS_ALLOW='^(-include|rte_config\.h|-mrtm)$' \
+  go test -count=1 -v ./control/dataplane ./dataplane/native
+
+gcc -std=c11 -Wall -Wextra -Werror $(pkg-config --cflags libdpdk) \
+  -Idataplane/native -fsyntax-only \
+  dataplane/native/dp_lookup.c dataplane/native/dp_action.c \
+  dataplane/native/dp_worker.c dataplane/native/dp_lookup_action_test.c
+~~~
+
+回归结果包括 Goal002 EAL lifecycle、partial TX ownership、Goal002R teardown failure、
+六类 cleanup guard、Goal003 20 个 parser fixture 和 malformed drop。结束后确认无
+`flow-router` process、`dfrx*`/`dftx*` TAP 或 `dfr-goal004005-*` 临时目录残留。
+当前没有已知未解决问题；不继续开发后续 Goal。

@@ -14,11 +14,21 @@ func run() error {
 	probe := flag.Bool("probe", false, "只执行 EAL init/info/cleanup")
 	rx := flag.String("rx-device", "net_tap_rx", "RX TAP vdev name")
 	tx := flag.String("tx-device", "net_tap_tx", "TX TAP vdev name")
+	rulesFile := flag.String("rules-file", "", "启动前静态 flow/route JSON 文件")
 	flag.Parse()
+	var rules dataplane.RuleSnapshot
+	if *rulesFile != "" {
+		var err error
+		rules, err = dataplane.LoadRulesFile(*rulesFile)
+		if err != nil {
+			return err
+		}
+	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	r, err := dataplane.Start(dataplane.Config{EALArgs: flag.Args(), RXDevice: *rx, TXDevice: *tx, Probe: *probe})
+	r, err := dataplane.Start(dataplane.Config{EALArgs: flag.Args(), RXDevice: *rx,
+		TXDevice: *tx, Probe: *probe, Rules: rules})
 	if err != nil {
 		return err
 	}
@@ -43,10 +53,16 @@ func run() error {
 	}
 	if !*probe {
 		fmt.Printf("stats: rx=%d parse_ok=%d parse_unsupported=%d parse_malformed=%d "+
-			"tx_accepted=%d tx_unsent=%d drop=%d\n", stats.RX, stats.ParseOK,
-			stats.ParseUnsupported, stats.ParseMalformed, stats.TXAccepted,
+			"flow_hit=%d route_hit=%d lookup_miss=%d action_drop=%d "+
+			"action_forward=%d action_rewrite=%d tx_accepted=%d tx_unsent=%d drop=%d\n",
+			stats.RX, stats.ParseOK, stats.ParseUnsupported, stats.ParseMalformed,
+			stats.FlowHit, stats.RouteHit, stats.LookupMiss, stats.ActionDrop,
+			stats.ActionForward, stats.ActionRewrite, stats.TXAccepted,
 			stats.TXUnsent, stats.Drop)
-		fmt.Printf("teardown: ports_closed=%d pool_in_use=%d pool_freed=%t\n", stats.PortsClosed, stats.PoolInUse, stats.PoolFreed)
+		fmt.Printf("teardown: ports_closed=%d pool_in_use=%d pool_freed=%t "+
+			"flow_table_freed=%t route_table_freed=%t action_store_freed=%t\n",
+			stats.PortsClosed, stats.PoolInUse, stats.PoolFreed,
+			stats.FlowTableFreed, stats.RouteTableFreed, stats.ActionStoreFreed)
 	}
 	fmt.Println("EAL cleanup succeeded")
 	return nil

@@ -13,9 +13,55 @@ struct dp_runtime_info {
 };
 struct dp_stats {
     uint64_t rx, parse_ok, parse_unsupported, parse_malformed;
+    uint64_t flow_hit, route_hit, lookup_miss;
+    uint64_t action_drop, action_forward, action_rewrite;
     uint64_t tx_accepted, tx_unsent, drop;
     unsigned int ports_closed, pool_in_use;
-    int pool_freed;
+    int pool_freed, flow_table_freed, route_table_freed, action_store_freed;
+};
+
+#define DP_MAX_FLOW_RULES 1024
+#define DP_MAX_ROUTE_RULES 1024
+
+enum dp_action_type {
+    DP_ACTION_DROP = 0,
+    DP_ACTION_FORWARD,
+    DP_ACTION_REWRITE,
+};
+
+enum dp_rewrite_mask {
+    DP_REWRITE_SRC_IPV4 = 1U << 0,
+    DP_REWRITE_DST_IPV4 = 1U << 1,
+    DP_REWRITE_SRC_PORT = 1U << 2,
+    DP_REWRITE_DST_PORT = 1U << 3,
+};
+
+/* Go 已完成 JSON 与地址校验；跨边界结构只携带 host byte order 数值。 */
+struct dp_rule_action {
+    uint8_t type;
+    uint8_t rewrite_mask;
+    uint16_t reserved;
+    uint32_t src_ipv4;
+    uint32_t dst_ipv4;
+    uint16_t src_port;
+    uint16_t dst_port;
+};
+
+struct dp_flow_rule {
+    uint32_t src_ipv4;
+    uint32_t dst_ipv4;
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint8_t l4_proto;
+    uint8_t reserved[3];
+    struct dp_rule_action action;
+};
+
+struct dp_route_rule {
+    uint32_t prefix;
+    uint8_t depth;
+    uint8_t reserved[3];
+    struct dp_rule_action action;
 };
 
 /* 除 request_stop 外，所有调用必须在同一个 owner OS thread 串行执行。
@@ -24,6 +70,9 @@ struct dp_stats {
  */
 int dp_runtime_init(int argc, char **argv);
 int dp_runtime_get_info(struct dp_runtime_info *info);
+int dp_configure_rules(const struct dp_flow_rule *flows, uint32_t flow_count,
+                       const struct dp_route_rule *routes,
+                       uint32_t route_count);
 int dp_dataplane_setup(const char *rx_device, const char *tx_device);
 int dp_dataplane_run(void);
 /* 唯一允许其他线程调用的入口：只写 C-owned atomic flag，不操作任何 queue。 */

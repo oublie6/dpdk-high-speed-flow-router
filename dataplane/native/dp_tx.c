@@ -22,7 +22,12 @@ dp_test_tx_partial_ownership(void)
 {
     struct rte_mempool *pool;
     struct rte_mbuf *pkts[4];
-    struct dp_stats stats = {.rx = 4, .parse_ok = 4};
+    struct dp_stats stats = {
+        .rx = 4,
+        .parse_ok = 4,
+        .flow_hit = 4,
+        .action_forward = 4,
+    };
     int ret = 0;
 
     if (!dp.initialized || dp.running || dp.pool)
@@ -39,11 +44,18 @@ dp_test_tx_partial_ownership(void)
 
     /* 模拟 PMD 只接受前两个 mbuf。helper 必须只释放未接受的尾部。 */
     dp_complete_tx(pkts, 4, 2, &stats);
-    if (stats.rx != 4 || stats.parse_ok != 4 || stats.tx_accepted != 2 ||
+    if (stats.rx != 4 || stats.parse_ok != 4 || stats.flow_hit != 4 ||
+        stats.action_forward != 4 || stats.tx_accepted != 2 ||
         stats.tx_unsent != 2 || stats.drop != 2 ||
         stats.rx != stats.parse_ok + stats.parse_unsupported +
                     stats.parse_malformed ||
-        stats.parse_ok != stats.tx_accepted + stats.tx_unsent ||
+        stats.parse_ok != stats.flow_hit + stats.route_hit + stats.lookup_miss ||
+        stats.parse_ok != stats.action_drop + stats.action_forward +
+                          stats.action_rewrite ||
+        stats.action_forward + stats.action_rewrite !=
+            stats.tx_accepted + stats.tx_unsent ||
+        stats.drop != stats.parse_unsupported + stats.parse_malformed +
+                      stats.action_drop + stats.tx_unsent ||
         rte_mempool_in_use_count(pool) != 2)
         ret = -EIO;
 

@@ -17,6 +17,7 @@ type Config struct {
 	EALArgs            []string
 	RXDevice, TXDevice string
 	Probe              bool
+	Rules              RuleSnapshot
 }
 
 // EAL 是 process-global、不可重入的资源；即使 init 失败，也不允许第二次尝试。
@@ -51,6 +52,9 @@ func validate(cfg Config) error {
 	if strings.IndexByte(cfg.RXDevice, 0) >= 0 || strings.IndexByte(cfg.TXDevice, 0) >= 0 {
 		return fmt.Errorf("device name contains a NUL byte")
 	}
+	if err := validateRules(cfg.Rules); err != nil {
+		return fmt.Errorf("static rules: %w", err)
+	}
 	return nil
 }
 
@@ -67,6 +71,7 @@ func Start(cfg Config) (*Runtime, error) {
 	lifecycle.attempted = true
 	// caller 返回后可以修改原始 slice；manager 拥有自己的参数快照。
 	cfg.EALArgs = append([]string(nil), cfg.EALArgs...)
+	cfg.Rules = cloneRules(cfg.Rules)
 	r := &Runtime{ready: make(chan struct{}), done: make(chan struct{})}
 	go r.owner(cfg)
 	return r, nil
@@ -123,6 +128,9 @@ func (r *Runtime) owner(cfg Config) {
 		if err == nil && r.info.LcoreCount != 1 {
 			err = fmt.Errorf("exactly one EAL lcore is required")
 		}
+	}
+	if err == nil && !cfg.Probe {
+		err = native.ConfigureRules(toNativeRules(cfg.Rules))
 	}
 	if err == nil && !cfg.Probe {
 		err = native.Setup(cfg.RXDevice, cfg.TXDevice)

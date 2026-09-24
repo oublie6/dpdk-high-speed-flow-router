@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**Goal 003 已验收通过，当前进入合并 Goal 004-005。**
+**合并 Goal 004-005 已由 Codex 完成，当前等待 ChatGPT 验收。**
 
 当前已经完成：
 
@@ -27,11 +27,16 @@
 - unsupported / malformed packet 立即 drop，parse OK packet 原样转发；
 - single-segment 明确支持、multi-segment 明确拒绝的 parser 边界；
 - 20 个 deterministic parser fixture 与 Goal003 IPv4/UDP TAP 正负向回归。
+- 启动前 `--rules-file <json>` 静态规则加载、严格校验与一次性发布；
+- DPDK `rte_hash` exact TCP/UDP 5-tuple flow lookup；
+- DPDK `rte_lpm` IPv4 route fallback 与 longest-prefix match；
+- 固定 `flow > route > default DROP` 优先级；
+- 统一 immutable action store，以及 DROP / FORWARD / REWRITE；
+- IPv4、TCP、UDP 部分字段原地 rewrite 与软件 checksum 重算；
+- lookup/action stats、资源 cleanup guard、确定性单元测试和 Goal004-005 TAP 回归。
 
 尚未实现：
 
-- flow/route table；
-- rewrite；
 - multi-queue / RSS；
 - benchmark；
 - Web API / frontend。
@@ -92,12 +97,12 @@ TAP RTC 端到端验证：
 ./scripts/verify_tap_forwarding.sh
 ~~~
 
-脚本动态生成两张短名称 TAP，只把本次接口设为 UP；它先注入一个 IHL=4 的
-malformed IPv4 frame，再注入合法 Ethernet/IPv4/UDP Goal003 marker。验证器要求
-malformed frame 不被转发，并在 TX TAP 对合法 frame 做完整逐字节比较，同时检查
-parser/TX/drop 三条统计守恒。结束时发送 SIGTERM，等待 worker 退出、port close、
-mempool free 与 EAL cleanup，并确认不遗留进程、接口和临时文件。它不配置 IP、
-route 或 firewall。
+脚本在临时目录生成静态 rules JSON 和两张短名称 TAP，只把本次接口设为 UP。它
+注入 flow DROP、flow REWRITE、route FORWARD、lookup miss 与 malformed 五类确定性
+IPv4/UDP packet，逐字节验证 FORWARD 不改包、REWRITE 结果和 IPv4/UDP checksum，
+并证明 flow DROP 优先于同时匹配的 route FORWARD。结束时检查五条 stats 守恒、
+lookup/action resource free、port close、mempool free、EAL cleanup，以及无进程、
+接口和临时文件残留。它不配置 IP、主机 route 或 firewall。
 
 推荐通过项目入口构建和测试：
 
@@ -124,10 +129,48 @@ FLOW_ROUTER_TEST_CPU="$EAL_CPU" \
     ./control/dataplane ./dataplane/native
 ~~~
 
-普通测试会运行不依赖 EAL 的 deterministic parser fixture；设置
-`FLOW_ROUTER_TEST_CPU` 后还会运行真实 EAL 回归和 TX partial-return ownership
-测试。这里的结果只证明 software/TAP 功能正确性，
+普通测试会运行 deterministic parser fixture 与 JSON 校验；设置
+`FLOW_ROUTER_TEST_CPU` 后还会运行真实 EAL、TX partial-return ownership、
+`rte_hash`/`rte_lpm`、DROP/FORWARD/REWRITE ownership 和 TCP/UDP checksum 测试。
+这里的结果只证明 software/TAP 功能正确性，
 不证明真实 NIC DMA、hardware RSS、NUMA cost、line-rate 或吞吐性能。
+
+## Goal 004-005：启动前静态规则
+
+运行数据面时可传入一次性 JSON snapshot：
+
+~~~sh
+./bin/flow-router --rules-file ./rules.json -- \
+  --lcores="0@${EAL_CPU}" --no-huge --no-pci --no-shconf --no-telemetry \
+  -m 256 --vdev=net_tap_rx,iface=dfrx0 --vdev=net_tap_tx,iface=dftx0
+~~~
+
+~~~json
+{
+  "flows": [
+    {
+      "src_ipv4": "192.0.2.1",
+      "dst_ipv4": "198.51.100.2",
+      "src_port": 12345,
+      "dst_port": 23456,
+      "protocol": "udp",
+      "action": {
+        "type": "rewrite",
+        "dst_ipv4": "203.0.113.9",
+        "dst_port": 34567
+      }
+    }
+  ],
+  "routes": [
+    {"prefix": "198.51.100.0/24", "action": {"type": "forward"}}
+  ]
+}
+~~~
+
+`action.type` 只能是 `drop`、`forward`、`rewrite`。rewrite 至少设置一个
+`src_ipv4`、`dst_ipv4`、`src_port`、`dst_port`；flow protocol 只能是 `tcp` 或
+`udp`。lookup 顺序固定为 exact flow、IPv4 LPM route、default DROP。规则只在
+`Run` 前发布，当前没有运行期 Add/Delete/Replace/reload。
 
 ## 为什么做这个项目
 
@@ -378,7 +421,8 @@ Cloud Native / Cloud Network Dataplane
 
 ## 当前下一步
 
-Goal 002 / Goal 002R / Goal 003 已正式验收通过，当前执行合并 Goal 004-005：
+Goal 002 / Goal 002R / Goal 003 已正式验收通过；合并 Goal 004-005 已完成实现，
+当前只等待 ChatGPT 验收：
 
 [Goal 002：统一 DPDK 25.11.3、收敛 native C 构建，并跑通 TAP RTC 转发](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md)
 
@@ -395,8 +439,8 @@ Goal 002 / Goal 002R / Goal 003 已正式验收通过，当前执行合并 Goal 
 
 [Goal 004-005：Static Lookup + DROP / FORWARD / REWRITE](docs/goals/004-005-static-lookup-action-rewrite.md)
 
-本阶段实现 parser + metadata：parse 成功仍原样 forwarding，unsupported/malformed
-packet drop。没有实现 flow/route lookup、rewrite、RSS 或多核；仍然只做软件仿真，
-不绑定真实 NIC。当前合并 Goal 004-005 一次完成 static exact-flow/LPM lookup、DROP/FORWARD/REWRITE 与 rewrite checksum；运行期动态热更新留给后续 Goal。
+本阶段已经完成 static exact-flow/LPM lookup、DROP/FORWARD/REWRITE、rewrite checksum
+与启动前 JSON snapshot。运行期 Add/Delete/Replace/reload、RCU/QSBR、RSS、多 queue
+和多 lcore 仍未实现；当前停止继续开发，等待本 Goal 验收。
 
 开发协作规则见 [AGENTS.md](AGENTS.md)。

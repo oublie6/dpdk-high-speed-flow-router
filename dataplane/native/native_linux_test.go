@@ -93,6 +93,9 @@ func TestRuntimeCleanupRejectsLiveResources(t *testing.T) {
 		{name: "worker", resource: testLiveWorker},
 		{name: "port", resource: testLivePort},
 		{name: "mempool", resource: testLiveMempool},
+		{name: "flow table", resource: testLiveFlowTable},
+		{name: "route table", resource: testLiveRouteTable},
+		{name: "action store", resource: testLiveActionStore},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,4 +136,39 @@ func TestPartialTXOwnership(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	t.Logf("%s", out)
+}
+
+// rte_hash、rte_lpm 与 mbuf pool 都使用真实 EAL allocator。该 case 单独占用
+// 进程，并给 LPM tbl24 留出足够的 no-huge 内存。
+func TestStaticLookupAndActions(t *testing.T) {
+	cpu := os.Getenv("FLOW_ROUTER_TEST_CPU")
+	if cpu == "" {
+		t.Skip("set FLOW_ROUTER_TEST_CPU to run the real EAL lookup/action test")
+	}
+	if os.Getenv("FLOW_ROUTER_LOOKUP_TEST_CHILD") == "1" {
+		runtime.LockOSThread()
+		args := []string{"--lcores=0@" + cpu, "--no-huge", "--no-pci",
+			"--no-shconf", "--no-telemetry", "-m", "256"}
+		if err := Init(args); err != nil {
+			t.Fatal(err)
+		}
+		if err := testStaticLookupActions(); err != nil {
+			t.Fatal(err)
+		}
+		if err := Cleanup(); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestStaticLookupAndActions$", "-test.v")
+	cmd.Env = append(os.Environ(), "FLOW_ROUTER_LOOKUP_TEST_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+	t.Log("flow exact hit PASS; route longest-prefix PASS; flow precedence PASS; " +
+		"lookup miss PASS; DROP ownership PASS; FORWARD unchanged PASS; " +
+		"UDP REWRITE + checksum PASS; TCP REWRITE + checksum PASS; " +
+		"lookup/action resources freed PASS")
 }

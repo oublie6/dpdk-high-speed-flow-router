@@ -12,6 +12,9 @@ enum dp_test_live_resource {
     DP_TEST_LIVE_WORKER = 1,
     DP_TEST_LIVE_PORT = 2,
     DP_TEST_LIVE_MEMPOOL = 3,
+    DP_TEST_LIVE_FLOW_TABLE = 4,
+    DP_TEST_LIVE_ROUTE_TABLE = 5,
+    DP_TEST_LIVE_ACTION_STORE = 6,
 };
 
 /* 临时构造一种存活资源并直接调用 cleanup；返回值应为 -EBUSY。 */
@@ -42,5 +45,8 @@ enum dp_test_parse_fixture {
 
 /* deterministic fixture 只供 package 内单元测试调用，不进入生产控制面。 */
 int dp_test_parse_fixture(int fixture, struct dp_packet_meta *meta);
+
+/* 在真实 EAL allocator 上覆盖 rte_hash、rte_lpm、action 与 mbuf ownership。 */
+int dp_test_static_lookup_actions(void);
 
 #endif

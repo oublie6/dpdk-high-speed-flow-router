@@ -59,7 +59,8 @@ int dp_runtime_cleanup(void)
         return -ENODEV;
     /* teardown 未完整结束时，EAL 仍可能被 worker、ethdev 或 mempool 引用。 */
     if (dp.running || dp.pool || dp.owned[0] || dp.owned[1] ||
-        dp.started[0] || dp.started[1])
+        dp.started[0] || dp.started[1] || dp.flow_table || dp.route_table ||
+        dp.actions || dp.rules_configured)
         return -EBUSY;
     /* teardown 失败也会报告错误并终止进程；不尝试第二次 EAL 生命周期。 */
     dp.initialized = false;
@@ -71,11 +72,18 @@ int dp_test_runtime_cleanup_guard(int resource)
     bool initialized = dp.initialized;
     bool running = dp.running;
     bool owned = dp.owned[0];
+    bool rules_configured = dp.rules_configured;
     struct rte_mempool *pool = dp.pool;
+    struct rte_hash *flow_table = dp.flow_table;
+    struct rte_lpm *route_table = dp.route_table;
+    struct dp_rule_action *actions = dp.actions;
     int ret;
 
     if (resource != DP_TEST_LIVE_WORKER && resource != DP_TEST_LIVE_PORT &&
-        resource != DP_TEST_LIVE_MEMPOOL)
+        resource != DP_TEST_LIVE_MEMPOOL &&
+        resource != DP_TEST_LIVE_FLOW_TABLE &&
+        resource != DP_TEST_LIVE_ROUTE_TABLE &&
+        resource != DP_TEST_LIVE_ACTION_STORE)
         return -EINVAL;
 
     dp.initialized = true;
@@ -90,6 +98,15 @@ int dp_test_runtime_cleanup_guard(int resource)
         /* cleanup guard 只比较 NULL，不会解引用这个测试哨兵。 */
         dp.pool = (struct rte_mempool *)1;
         break;
+    case DP_TEST_LIVE_FLOW_TABLE:
+        dp.flow_table = (struct rte_hash *)1;
+        break;
+    case DP_TEST_LIVE_ROUTE_TABLE:
+        dp.route_table = (struct rte_lpm *)1;
+        break;
+    case DP_TEST_LIVE_ACTION_STORE:
+        dp.actions = (struct dp_rule_action *)1;
+        break;
     }
 
     ret = dp_runtime_cleanup();
@@ -97,5 +114,9 @@ int dp_test_runtime_cleanup_guard(int resource)
     dp.running = running;
     dp.owned[0] = owned;
     dp.pool = pool;
+    dp.rules_configured = rules_configured;
+    dp.flow_table = flow_table;
+    dp.route_table = route_table;
+    dp.actions = actions;
     return ret;
 }

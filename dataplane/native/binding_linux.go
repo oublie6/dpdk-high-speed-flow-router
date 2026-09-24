@@ -30,9 +30,53 @@ type Stats struct {
 	RX                         uint64
 	ParseOK, ParseUnsupported  uint64
 	ParseMalformed             uint64
+	FlowHit, RouteHit          uint64
+	LookupMiss                 uint64
+	ActionDrop, ActionForward  uint64
+	ActionRewrite              uint64
 	TXAccepted, TXUnsent, Drop uint64
 	PortsClosed, PoolInUse     uint
 	PoolFreed                  bool
+	FlowTableFreed             bool
+	RouteTableFreed            bool
+	ActionStoreFreed           bool
+}
+
+const (
+	MaxFlowRules   = int(C.DP_MAX_FLOW_RULES)
+	MaxRouteRules  = int(C.DP_MAX_ROUTE_RULES)
+	ActionDrop     = uint8(C.DP_ACTION_DROP)
+	ActionForward  = uint8(C.DP_ACTION_FORWARD)
+	ActionRewrite  = uint8(C.DP_ACTION_REWRITE)
+	RewriteSrcIPv4 = uint8(C.DP_REWRITE_SRC_IPV4)
+	RewriteDstIPv4 = uint8(C.DP_REWRITE_DST_IPV4)
+	RewriteSrcPort = uint8(C.DP_REWRITE_SRC_PORT)
+	RewriteDstPort = uint8(C.DP_REWRITE_DST_PORT)
+)
+
+type Action struct {
+	Type             uint8
+	RewriteMask      uint8
+	SrcIPv4, DstIPv4 uint32
+	SrcPort, DstPort uint16
+}
+
+type FlowRule struct {
+	SrcIPv4, DstIPv4 uint32
+	SrcPort, DstPort uint16
+	L4Proto          uint8
+	Action           Action
+}
+
+type RouteRule struct {
+	Prefix uint32
+	Depth  uint8
+	Action Action
+}
+
+type RuleSnapshot struct {
+	Flows  []FlowRule
+	Routes []RouteRule
 }
 
 // EAL 可能重排 argv，因此保存原始分配地址直到 cleanup；没有 Go pointer 逃逸。
@@ -84,6 +128,52 @@ func GetInfo() (Info, error) {
 		RXDesc: uint16(info.rx_desc), TXDesc: uint16(info.tx_desc),
 		NBMbuf: uint(info.nb_mbuf), CacheSize: uint(info.cache_size), SocketID: int(info.socket_id)}, nil
 }
+
+// ConfigureRules 同步复制完整 snapshot；返回后 C 不再借用临时 rule array。
+func ConfigureRules(snapshot RuleSnapshot) error {
+	if len(snapshot.Flows) > MaxFlowRules || len(snapshot.Routes) > MaxRouteRules {
+		return fmt.Errorf("rule snapshot exceeds native capacity")
+	}
+
+	var flows *C.struct_dp_flow_rule
+	if len(snapshot.Flows) != 0 {
+		flows = C.dp_flow_rules_alloc(C.size_t(len(snapshot.Flows)))
+		if flows == nil {
+			return fmt.Errorf("allocate flow rule array: out of memory")
+		}
+		defer C.dp_rule_array_free(unsafe.Pointer(flows))
+		for i, rule := range snapshot.Flows {
+			action := rule.Action
+			C.dp_flow_rule_set(flows, C.size_t(i), C.uint32_t(rule.SrcIPv4),
+				C.uint32_t(rule.DstIPv4), C.uint16_t(rule.SrcPort),
+				C.uint16_t(rule.DstPort), C.uint8_t(rule.L4Proto),
+				C.uint8_t(action.Type), C.uint8_t(action.RewriteMask),
+				C.uint32_t(action.SrcIPv4), C.uint32_t(action.DstIPv4),
+				C.uint16_t(action.SrcPort), C.uint16_t(action.DstPort))
+		}
+	}
+
+	var routes *C.struct_dp_route_rule
+	if len(snapshot.Routes) != 0 {
+		routes = C.dp_route_rules_alloc(C.size_t(len(snapshot.Routes)))
+		if routes == nil {
+			return fmt.Errorf("allocate route rule array: out of memory")
+		}
+		defer C.dp_rule_array_free(unsafe.Pointer(routes))
+		for i, rule := range snapshot.Routes {
+			action := rule.Action
+			C.dp_route_rule_set(routes, C.size_t(i), C.uint32_t(rule.Prefix),
+				C.uint8_t(rule.Depth), C.uint8_t(action.Type),
+				C.uint8_t(action.RewriteMask), C.uint32_t(action.SrcIPv4),
+				C.uint32_t(action.DstIPv4), C.uint16_t(action.SrcPort),
+				C.uint16_t(action.DstPort))
+		}
+	}
+
+	return status("configure static rules", C.dp_configure_rules(flows,
+		C.uint32_t(len(snapshot.Flows)), routes, C.uint32_t(len(snapshot.Routes))))
+}
+
 func Setup(rxDevice, txDevice string) error {
 	rx, tx := C.CString(rxDevice), C.CString(txDevice)
 	defer C.free(unsafe.Pointer(rx))
@@ -101,8 +191,13 @@ func GetStats() (Stats, error) {
 	}
 	return Stats{RX: uint64(s.rx), ParseOK: uint64(s.parse_ok),
 		ParseUnsupported: uint64(s.parse_unsupported), ParseMalformed: uint64(s.parse_malformed),
+		FlowHit: uint64(s.flow_hit), RouteHit: uint64(s.route_hit),
+		LookupMiss: uint64(s.lookup_miss), ActionDrop: uint64(s.action_drop),
+		ActionForward: uint64(s.action_forward), ActionRewrite: uint64(s.action_rewrite),
 		TXAccepted: uint64(s.tx_accepted), TXUnsent: uint64(s.tx_unsent),
-		Drop: uint64(s.drop), PortsClosed: uint(s.ports_closed), PoolInUse: uint(s.pool_in_use), PoolFreed: s.pool_freed != 0}, nil
+		Drop: uint64(s.drop), PortsClosed: uint(s.ports_closed), PoolInUse: uint(s.pool_in_use),
+		PoolFreed: s.pool_freed != 0, FlowTableFreed: s.flow_table_freed != 0,
+		RouteTableFreed: s.route_table_freed != 0, ActionStoreFreed: s.action_store_freed != 0}, nil
 }
 func Cleanup() error {
 	err := status("EAL cleanup", C.dp_runtime_cleanup())
@@ -117,10 +212,17 @@ func testPartialTXOwnership() error {
 	return status("partial TX ownership test", C.dp_test_tx_partial_ownership())
 }
 
+func testStaticLookupActions() error {
+	return status("static lookup/action test", C.dp_test_static_lookup_actions())
+}
+
 const (
-	testLiveWorker  = 1
-	testLivePort    = 2
-	testLiveMempool = 3
+	testLiveWorker      = 1
+	testLivePort        = 2
+	testLiveMempool     = 3
+	testLiveFlowTable   = 4
+	testLiveRouteTable  = 5
+	testLiveActionStore = 6
 )
 
 // testCleanupGuard 直接返回 cleanup 的 errno，供 package 测试断言防御边界。
