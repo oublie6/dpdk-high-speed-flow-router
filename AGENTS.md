@@ -485,58 +485,54 @@ Go -> cgo -> project C API -> DPDK EAL
 
 Goal 002 ✅
 DPDK 25.11.3
-+ package-local native C
-+ 双 TAP Virtual PMD
-+ C-owned mempool
-+ 单 RXQ/TXQ
++ TAP Virtual PMD
++ mempool
++ RXQ/TXQ
 + single-lcore RTC
 
 Goal 002R ✅
 + safe teardown / cleanup guard
-+ argv C helper
-+ project-local build env
++ cgo argv helper
++ build environment hardening
 
 Goal 003 ✅
 Ethernet / IPv4 / TCP / UDP parser
 + host-order metadata
-+ parser failure drop
++ malformed / unsupported handling
 
 Goal 004-005 ✅
-static rte_hash exact-flow
-+ rte_lpm IPv4 route fallback
+rte_hash exact-flow
++ rte_lpm route fallback
 + DROP / FORWARD / REWRITE
 + checksum
 + startup JSON snapshot
 
-Goal 006-007 ✅（Codex 已完成，待 ChatGPT 验收）
-dynamic Go rule management
-+ immutable native rule snapshots
-+ atomic publish
-+ DPDK RCU/QSBR
+Goal 006-007 ✅
+Go dynamic rule CRUD
++ immutable native generations
++ atomic snapshot publish
++ DPDK QSBR
 + safe old-generation reclaim
++ same-PID runtime reload
 ~~~
 
-当前仍然只证明 software/simulation dataplane 功能正确性，不绑定真实 NIC，
-不宣称 hardware RSS、NUMA performance、line-rate 或吞吐性能。
+当前仍然只证明 software/simulation dataplane 功能与并发回收正确性，不绑定真实 NIC，
+不宣称 hardware RSS、NUMA performance、line-rate 或真实硬件吞吐性能。
 
 ## 17. 当前执行任务
 
-当前已完成并停止开发，等待验收：
+当前没有进行中的实现 Goal。
 
-`docs/goals/006-007-dynamic-rules-qsbr.md`
+DPDK 项目只剩最后一个合并阶段：
 
-本合并 Goal 一次完成：
+~~~text
+Goal 008-009
+multi-queue / RSS / multi-lcore
++ fixed RXQ -> worker ownership
++ per-lcore stats
++ benchmark / profiling
+~~~
 
-1. Go Runtime 动态 Replace/Add/Delete flow/route；
-2. 每次更新重建完整 immutable native snapshot；
-3. atomic pointer publish；
-4. packet worker lock-free read；
-5. DPDK QSBR reader register/online/quiescent/offline/unregister；
-6. grace period 后安全回收旧 hash/LPM/action snapshot；
-7. runtime packet 行为在同一 PID 内随 generation 改变；
-8. dynamic publish / cleanup / failure regression。
+Goal 008-009 验收通过后，本 DPDK 项目阶段性封板并转入 VPP / GoVPP。
 
-禁止自行进入 RSS、multi-queue、multi-lcore、benchmark、REST/gRPC/Web。
-
-Codex 已完成 Goal 006-007，不进入 RSS、multi-queue、multi-lcore 或 benchmark，
-等待 ChatGPT 验收。
+在 Goal 008-009 文档与验收标准明确之前，Codex 不应自行继续开发。
