@@ -1,7 +1,7 @@
 # Goal 004-005：Static Lookup + DROP / FORWARD / REWRITE
 
 日期：2026-09-24  
-状态：✅ Codex 已完成，待 ChatGPT 验收
+状态：✅ ChatGPT 验收通过
 
 ## 1. 背景
 
@@ -518,3 +518,42 @@ gcc -std=c11 -Wall -Wextra -Werror $(pkg-config --cflags libdpdk) \
 六类 cleanup guard、Goal003 20 个 parser fixture 和 malformed drop。结束后确认无
 `flow-router` process、`dfrx*`/`dftx*` TAP 或 `dfr-goal004005-*` 临时目录残留。
 当前没有已知未解决问题；不继续开发后续 Goal。
+
+
+---
+
+## 21. ChatGPT 验收结论（2026-09-24）
+
+验收 commit：
+
+~~~text
+29d6e7effb634bcdc57f48cec743dc898bea130f
+dataplane: add static lookup and packet actions
+~~~
+
+验收结果：**通过。**
+
+确认：
+
+- exact flow 使用 rte_hash，固定 16-byte 5-tuple key，构造时整体清零，reserved/padding 不携带未初始化数据；
+- IPv4 route 使用 rte_lpm，lookup key 沿用 Goal 003 host-order dst IPv4，并有 /8 与 /24 longest-prefix 实测；
+- lookup 顺序严格为 exact flow -> route fallback -> default DROP，flow hit 后不继续查 route；
+- flow/route 统一引用 C-owned immutable action store，Run 期间不修改，因此当前无需 RCU/QSBR；
+- Go 只负责启动前 JSON 解析/校验和数值 snapshot，C 不解析 JSON，运行期没有 Add/Delete/Replace/reload；
+- DROP ownership、FORWARD 原样转发、TCP/UDP REWRITE 均在 C hot path 内完成；
+- rewrite 仅修改 mask 指定的 IPv4/port 字段，其他 header/payload 保持；
+- rewrite 后软件重算 IPv4/TCP/UDP checksum，不依赖 TX checksum offload；
+- UDP checksum 路径正确处理 UDP datagram length 小于 IPv4 payload 的情况；
+- worker 保持 single-lcore RTC、原地 compact、一次 TX burst 和既有 zero-retry partial-return ownership；
+- lookup/action stats 的五条守恒关系与 parser/TX ownership 一致；
+- ConfigureRules/Setup 失败后仍通过同一 Teardown 回收 partial flow/LPM/action state；
+- cleanup guard 已覆盖 worker、port、mempool、flow table、route table、action store；
+- TAP E2E 有 flow precedence DROP、UDP REWRITE+checksum、route FORWARD unchanged、lookup miss DROP、Goal003 malformed regression 的运行证据；
+- native 单元测试还覆盖 TCP REWRITE、LPM longest-prefix、5-tuple miss、padding 稳定、DROP ownership 等；
+- 没有加入 runtime update、RCU/QSBR、RSS/multi-queue、多核、benchmark、API/Web 等后续 scope。
+
+一个非阻塞说明：当前明确不支持 /0 default route，lookup miss 的默认策略仍是 DROP；这符合本 Goal “如实现 /0 则测试”的边界。
+
+当前证据仍只代表 software/TAP 功能正确性，不代表真实 NIC、hardware RSS、NUMA 或 line-rate 性能。
+
+合并 Goal 004-005 正式完成。
