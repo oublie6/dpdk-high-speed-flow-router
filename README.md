@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**Goal 006-007 已验收通过。**
+**Goal 006-007 已验收通过，当前进入最终 Goal 008-009：multi-queue / RSS-affinity / multi-lcore + benchmark。**
 
 当前已经完成：
 
@@ -44,9 +44,8 @@
 
 尚未实现：
 
-- multi-queue / RSS；
-- benchmark；
-- Web API / frontend。
+- Goal 008-009：multi-queue / multi-lcore、TAP flow-affinity、per-worker stats、benchmark；
+- Web API / frontend（v0.1 暂缓，不再作为封板前要求）。
 
 详细边界见 [架构与 ownership](docs/architecture.md)，实现与验收证据见
 [Goal 002](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md) 和
@@ -513,3 +512,35 @@ Go CRUD
 Web/API 暂缓，避免偏离高性能数据面主线。
 
 下一阶段只剩 Goal 008-009：RSS / multi-queue / multi-lcore + benchmark/profiling。
+
+
+## 最终 Goal 008-009
+
+当前执行：
+
+[Goal 008-009：Multi-Queue / RSS / Multi-Lcore + Benchmark](docs/goals/008-009-multiqueue-rss-benchmark.md)
+
+目标：
+
+~~~text
+RX port
+├─ RXQ0 -> worker0/lcore0 -> TXQ0
+├─ RXQ1 -> worker1/lcore1 -> TXQ1
+├─ RXQ2 -> worker2/lcore2 -> TXQ2
+└─ RXQ3 -> worker3/lcore3 -> TXQ3
+~~~
+
+每个 worker 保持 RTC，并独占自己的 RXQ/TXQ；packet stats 改为 per-worker，QSBR reader id 与 worker id 对齐。
+
+当前 TAP/software 环境只要求验证：
+
+~~~text
+same 5-tuple -> stable worker affinity
+many flows -> spread across multiple workers
+~~~
+
+这属于 Linux TAP/kernel software flow-based distribution 证据，不等价于真实 NIC hardware RSS/RETA。显式 TAP rte_flow RSS 若环境支持可额外验证，不作为硬性依赖。
+
+本 Goal 同时交付可重复 software benchmark，至少覆盖 1/2/4 workers、64/1500B、1/1024 flows，并记录 offered load、RX/TX/drop、Mpps/Gbps、CPU 与 worker distribution。
+
+Goal 008-009 验收通过后，DPDK Flow Router v0.1 阶段性封板，下一步转入 VPP / GoVPP。
