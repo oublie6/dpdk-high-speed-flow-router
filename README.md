@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**合并 Goal 004-005 已由 Codex 完成，当前等待 ChatGPT 验收。**
+**合并 Goal 004-005 已验收通过。**
 
 当前已经完成：
 
@@ -421,8 +421,7 @@ Cloud Native / Cloud Network Dataplane
 
 ## 当前下一步
 
-Goal 002 / Goal 002R / Goal 003 已正式验收通过；合并 Goal 004-005 已完成实现，
-当前只等待 ChatGPT 验收：
+Goal 002 / Goal 002R / Goal 003 / 合并 Goal 004-005 已正式验收通过：
 
 [Goal 002：统一 DPDK 25.11.3、收敛 native C 构建，并跑通 TAP RTC 转发](docs/goals/002-dpdk-25-11-3-tap-rtc-forwarding.md)
 
@@ -440,7 +439,6 @@ Goal 002 / Goal 002R / Goal 003 已正式验收通过；合并 Goal 004-005 已�
 [Goal 004-005：Static Lookup + DROP / FORWARD / REWRITE](docs/goals/004-005-static-lookup-action-rewrite.md)
 
 本阶段已经完成 static exact-flow/LPM lookup、DROP/FORWARD/REWRITE、rewrite checksum
-与启动前 JSON snapshot。运行期 Add/Delete/Replace/reload、RCU/QSBR、RSS、多 queue
-和多 lcore 仍未实现；当前停止继续开发，等待本 Goal 验收。
+与启动前 JSON snapshot。运行期 Add/Delete/Replace/reload、RCU/QSBR、RSS、多 queue 和多 lcore 仍未实现。下一步进入后续收尾阶段设计。
 
 开发协作规则见 [AGENTS.md](AGENTS.md)。
