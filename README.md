@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**Goal 006-007 已由 Codex 完成，当前等待 ChatGPT 复验。**
+**Goal 006-007 已验收通过。**
 
 当前已经完成：
 
@@ -495,7 +495,7 @@ DPDK 项目阶段性封板
 VPP / GoVPP
 ~~~
 
-当前已完成、待复验：
+当前已验收通过：
 
 [Goal 006-007：Dynamic Rule Publication + RCU/QSBR](docs/goals/006-007-dynamic-rules-qsbr.md)
 
@@ -512,5 +512,4 @@ Go CRUD
 
 Web/API 暂缓，避免偏离高性能数据面主线。
 
-复验通过后的下一阶段是 Goal 008-009；本次实现没有进入 RSS、multi-queue、
-multi-lcore 或 benchmark。
+下一阶段只剩 Goal 008-009：RSS / multi-queue / multi-lcore + benchmark/profiling。
