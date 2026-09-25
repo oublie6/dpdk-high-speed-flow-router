@@ -1,7 +1,7 @@
 # Goal 008-009：Multi-Queue / RSS / Multi-Lcore + Benchmark
 
 日期：2026-09-25  
-状态：✅ Codex 已完成，待 ChatGPT 验收
+状态：✅ ChatGPT 已验收通过（2026-09-25）
 
 ## 1. 背景与目标
 
@@ -983,4 +983,53 @@ TCP/UDP checksum、Go CRUD、atomic publication、2-reader QSBR、idle readers�
 
 本 Goal 没有实现或声称证明 real NIC/VFIO、hardware RETA、cross-NUMA optimization、
 per-NUMA mempool、NAT、conntrack、ARP、IPv6、Web/API、VPP、RDMA 或 SmartNIC。DPDK Flow
-Router v0.1 已阶段性封板，等待 ChatGPT 验收。
+Router v0.1 已阶段性封板。
+
+
+---
+
+## 28. ChatGPT 最终验收结论（2026-09-25）
+
+验收实现 commit：
+
+~~~text
+97359e2103a8ea9d21f71c7bbcb9efa804e76c49
+dataplane: add multi-queue workers and benchmark
+~~~
+
+最终证据刷新 commit：
+
+~~~text
+86055de3c20239d7335e6fe892148d27800cef44
+bench: refresh final Goal 008-009 evidence
+~~~
+
+验收结果：**通过。**
+
+确认：
+
+- 1/2/4 worker multi-lcore RTC 已实现，worker i 固定独占 RXQi/TXQi；
+- worker0 使用 main lcore，其余 worker 使用 DPDK remote lcore，stop/join/error lifecycle 完整；
+- packet hot path stats 已拆为 cache-line 对齐的 per-worker counters，聚合发生在 workers stop/join 后；
+- QSBR 已扩展为 reader_id = worker_id，多 reader 测试真实证明 reader0 单独 quiescent 不足以回收旧 generation，reader1 也跨过 quiescent 后才完成 grace period；
+- RX=0 idle worker 继续报告 quiescent，低流量 queue 不会阻塞同步 publish；
+- TAP/kernel software multi-queue 实验验证 same-flow affinity 与 multi-flow spread；
+- 2-worker 条件下 dynamic rules 继续完成同一 PID 的 DROP -> REWRITE -> route FORWARD；
+- partial TX ownership、parser、hash/LPM、rewrite/checksum、CRUD、atomic snapshot publication、50+ publish stress 等历史回归均有记录；
+- worker / reader / snapshot / QSBR / ports / mempool / EAL cleanup 路径闭合；
+- 正式 benchmark 使用远端可追溯、worktree clean 的源码 commit `97359e2...` 重新执行；
+- benchmark 至少覆盖 1/2/4 workers × 64/1500B × 1/1024 flows，共 12 cases；
+- 本次 evidence commit 的 parent 正是被测源码 commit，且仅修改 Goal/benchmark results，没有改变 dataplane 实现；
+- benchmark 结果明确限定为 software TAP / kernel / raw-socket end-to-end evidence，没有声称 physical NIC DMA、hardware RSS/RETA、cross-NUMA performance 或 line-rate。
+
+最终 benchmark TX Mpps 范围：
+
+~~~text
+1 worker: 0.075491 - 0.090001
+2 workers: 0.076667 - 0.091479
+4 workers: 0.089836 - 0.104208
+~~~
+
+最高记录为 4 workers、1500B、1 flow：0.104208 Mpps / 1.250495 Gbps。该数字仅代表当前 software TAP/kernel/generator/capture 组合环境。
+
+DPDK Flow Router v0.1 正式阶段性完成。下一阶段转入 VPP / GoVPP。

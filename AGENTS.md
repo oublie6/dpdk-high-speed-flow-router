@@ -515,7 +515,7 @@ Go dynamic rule CRUD
 + safe old-generation reclaim
 + same-PID runtime reload
 
-Goal 008-009 ✅ Codex 已完成，待 ChatGPT 验收
+Goal 008-009 ✅
 multi-queue / multi-lcore RTC
 + fixed RXQ/TXQ ownership
 + per-worker stats
@@ -546,4 +546,4 @@ multi-queue / multi-lcore RTC
 
 禁止自行扩展 real NIC/VFIO、hardware RETA、NAT、conntrack、Web/API、VPP 等 scope。
 
-DPDK Flow Router v0.1 现阶段已封板。等待 ChatGPT 验收；不得自行继续扩展 DPDK 项目。
+DPDK Flow Router v0.1 已通过 ChatGPT 最终验收并阶段性封板；不得自行继续扩展 DPDK 项目。下一阶段转入 VPP / GoVPP。

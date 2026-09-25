@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**DPDK Flow Router v0.1 已完成 Goal 008-009 实现，等待 ChatGPT 最终验收。**
+**DPDK Flow Router v0.1 已完成并通过 Goal 008-009 最终验收，DPDK 阶段性封板。**
 
 当前已经完成：
 
@@ -515,7 +515,7 @@ Go CRUD
 
 Web/API 暂缓，避免偏离高性能数据面主线。
 
-Goal 008-009 已完成 Codex 实现与自测，等待 ChatGPT 最终验收。
+Goal 008-009 已完成实现、自测与 ChatGPT 最终验收。DPDK Flow Router v0.1 阶段性封板。
 
 
 ## 最终 Goal 008-009
@@ -567,5 +567,5 @@ RX/TX/drop、Mpps/Gbps、CPU 与 worker distribution。详细方法见
 [Markdown](results/goal008009-software-benchmark.md) 和
 [CSV](results/goal008009-software-benchmark.csv)。
 
-Goal 008-009 等待 ChatGPT 验收；验收后 DPDK Flow Router v0.1 阶段性封板，下一步转入
-VPP / GoVPP。本仓库不继续扩展 Goal 范围。
+Goal 008-009 已通过 ChatGPT 最终验收。DPDK Flow Router v0.1 阶段性封板，下一步转入
+VPP / GoVPP。本仓库不继续扩展 DPDK Goal 范围。
