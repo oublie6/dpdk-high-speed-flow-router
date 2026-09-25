@@ -910,7 +910,7 @@ PASS，也不声称 hardware RSS/RETA。
 benchmark source commit：
 
 ~~~text
-f4b28ab26dfb34034922c63ae5240521b22fc5aa
+97359e2103a8ea9d21f71c7bbcb9efa804e76c49
 worktree_dirty=false
 ~~~
 
@@ -925,12 +925,12 @@ CPUs、单 NUMA node 0、net_tap software PMD。正式执行：
 1/2/4 workers × 64/1500B × 1/1024 flows。TX 吞吐范围：
 
 ~~~text
-1 worker: 0.060003 - 0.081845 Mpps
-2 workers: 0.066255 - 0.091159 Mpps
-4 workers: 0.082581 - 0.097918 Mpps
+1 worker: 0.075491 - 0.090001 Mpps
+2 workers: 0.076667 - 0.091479 Mpps
+4 workers: 0.089836 - 0.104208 Mpps
 ~~~
 
-最高记录为 4 workers、1500B、1 flow：0.097918 Mpps / 1.175022 Gbps。该数字包含
+最高记录为 4 workers、1500B、1 flow：0.104208 Mpps / 1.250495 Gbps。该数字包含
 同机 Python raw-socket generator/capture、kernel 和 TAP；多个 case 的 offered > router
 visible RX，另一些 case 接近 generator offered ceiling。结果只说明 generator/TAP/kernel
 组合路径与相对趋势，没有宣称 router-limited scaling 或 line-rate。原始逐 case counters、
