@@ -569,3 +569,13 @@ RX/TX/drop、Mpps/Gbps、CPU 与 worker distribution。详细方法见
 
 Goal 008-009 已通过 ChatGPT 最终验收。DPDK Flow Router v0.1 阶段性封板，下一步转入
 VPP / GoVPP。本仓库不继续扩展 DPDK Goal 范围。
+
+
+---
+
+## 2026-10-09 跨项目知识衔接（不改变封板状态）
+
+**DPDK Flow Router v0.1 继续封板，不增加代码或 Goal 范围。**
+本轮仅补充 [DPDK QSBR / VPP worker barrier / DPO atomic / adjacency refcount 的源码对照](docs/2026-10-09-qsbr-vpp-barrier-lifetime-comparison.md)。
+
+新的 VPP 学习与项目接续详见 [VPP 项目进度文档](https://github.com/oublie6/vpp-cloud-native-service-gateway/blob/main/docs/2026-10-09-goal001-vpp-runtime-dpo-concurrency-handoff.md)；Goal001 工程已验收，Goal002 尚未启动。
